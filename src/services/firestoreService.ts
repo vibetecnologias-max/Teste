@@ -125,12 +125,41 @@ export async function persistClinicalRecord(record: ClinicalRecord): Promise<voi
   }
 }
 
-// AUDIT LOGS (IMMUTABLE)
-export async function persistAuditLog(log: AuditLog): Promise<void> {
+// AUDIT LOGS (IMMUTABLE & SANITIZED)
+/**
+ * Sanitizes audit logs to ensure no passwords or clinical sensitive notes
+ * (evolution notes, private notes, diagnostic hypotheses) are stored in the audit trail.
+ */
+export function sanitizeAuditLog(log: AuditLog): AuditLog {
+  let sanitizedDetails = log.details || '';
+  const sensitivePatterns = [
+    /password[=:\s]+[^\s,]+/gi,
+    /evolutionNotes/gi,
+    /privateNotes/gi,
+    /diagnosticHypothesis/gi,
+    /conductPlan/gi
+  ];
+
+  for (const pattern of sensitivePatterns) {
+    sanitizedDetails = sanitizedDetails.replace(pattern, '[DADO_SENSIVEL_OMITIDO]');
+  }
+
+  return {
+    ...log,
+    details: sanitizedDetails.slice(0, 1000)
+  };
+}
+
+export async function persistAuditLog(log: AuditLog): Promise<{ success: boolean; error?: string }> {
   try {
-    await setDoc(doc(db, 'audit_logs', log.id), log);
+    const sanitized = sanitizeAuditLog(log);
+    await setDoc(doc(db, 'audit_logs', sanitized.id), sanitized);
+    return { success: true };
   } catch (error) {
-    console.error('Falha ao gravar log de auditoria no Firestore:', error);
+    const msg = error instanceof Error ? error.message : 'Falha na comunicação com o Firestore ao registrar auditoria.';
+    console.error('Falha crítica ao gravar log de auditoria no Firestore:', msg);
+    handleFirestoreError(error, OperationType.WRITE, `audit_logs/${log.id}`);
+    return { success: false, error: msg };
   }
 }
 

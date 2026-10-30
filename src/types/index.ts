@@ -180,6 +180,7 @@ export interface UserSubscription {
 export interface AppNotification {
   id: string;
   recipientUserId: string;
+  senderId?: string;
   type: 'appointment_request' | 'appointment_confirmed' | 'appointment_rejected' | 'cancellation_requested' | 'cancellation_confirmed' | 'payment_received' | 'system';
   title: string;
   message: string;

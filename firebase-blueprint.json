@@ -182,6 +182,7 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "recipientUserId": { "type": "string", "maxLength": 128 },
+        "senderId": { "type": "string", "maxLength": 128 },
         "type": { "type": "string", "maxLength": 50 },
         "title": { "type": "string", "maxLength": 150 },
         "message": { "type": "string", "maxLength": 500 },

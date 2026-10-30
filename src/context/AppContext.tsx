@@ -310,6 +310,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const newNotif: AppNotification = {
         id: `notif_${Date.now()}`,
         recipientUserId: data.psychologistId,
+        senderId: currentUser.uid,
         type: 'appointment_request',
         title: 'Nova solicitação de agendamento',
         message: `${data.patientName} solicitou atendimento para ${data.date.split('-').reverse().join('/')} às ${data.startTime}.`,
@@ -362,6 +363,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const notif: AppNotification = {
           id: `notif_${Date.now()}`,
           recipientUserId: target.patientUserId,
+          senderId: currentUser?.uid,
           type: 'appointment_confirmed',
           title: 'Consulta Confirmada!',
           message: `Seu agendamento para ${target.date.split('-').reverse().join('/')} às ${target.startTime} foi confirmado pelo psicólogo.`,
@@ -403,6 +405,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const notif: AppNotification = {
           id: `notif_${Date.now()}`,
           recipientUserId: target.patientUserId,
+          senderId: currentUser?.uid,
           type: 'appointment_rejected',
           title: 'Solicitação de agendamento não aceita',
           message: `Infelizmente seu pedido para ${target.date.split('-').reverse().join('/')} às ${target.startTime} não pôde ser aceito. Motivo: ${reason || 'Indisponibilidade de agenda.'}`,

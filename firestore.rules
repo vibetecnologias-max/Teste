@@ -17,28 +17,37 @@ service cloud.firestore {
     }
 
     // USERS COLLECTION
-    // Anti-privilege-escalation: users can NEVER self-assign 'superadmin' role
+    // Anti-privilege-escalation & Profile protection (Hardening Etapa 2)
+    // Common users cannot change role, uid, clinicId, professionalId, status, permissions.
+    // Allowed update fields for regular users: displayName, phone, avatarUrl, photoURL, updatedAt.
     match /users/{userId} {
       allow get: if isSignedIn() && (request.auth.uid == userId || isSuperAdmin());
       allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isSuperAdmin());
       allow create: if isSignedIn() && request.auth.uid == userId &&
         request.resource.data.uid == request.auth.uid &&
         request.resource.data.role != 'superadmin' &&
-        (request.resource.data.role in ['psychologist', 'clinic_manager', 'patient']);
+        (request.resource.data.role in ['psychologist', 'clinic_manager', 'patient']) &&
+        request.resource.data.status == 'active';
       allow update: if isSignedIn() && (
+        isSuperAdmin() ||
         (request.auth.uid == userId &&
          request.resource.data.role == resource.data.role &&
-         request.resource.data.uid == resource.data.uid) ||
-        isSuperAdmin()
+         request.resource.data.uid == resource.data.uid &&
+         request.resource.data.status == resource.data.status &&
+         (!('clinicId' in resource.data) || request.resource.data.clinicId == resource.data.clinicId) &&
+         (!('professionalId' in resource.data) || request.resource.data.professionalId == resource.data.professionalId) &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'phone', 'avatarUrl', 'photoURL', 'updatedAt']))
       );
       allow delete: if isSuperAdmin();
     }
 
     // PROFESSIONALS DIRECTORY
+    // Hardening: userId link is immutable, preventing altering records of other professionals.
     match /professionals/{profId} {
       allow get, list: if isSignedIn();
       allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
-      allow update: if isSignedIn() && resource.data.userId == request.auth.uid &&
+      allow update: if isSignedIn() &&
+        resource.data.userId == request.auth.uid &&
         request.resource.data.userId == resource.data.userId;
       allow delete: if isSuperAdmin();
     }
@@ -80,43 +89,74 @@ service cloud.firestore {
         request.resource.data.userId == request.auth.uid
       );
       allow update: if isSignedIn() && (
-        resource.data.psychologistId == request.auth.uid ||
-        resource.data.userId == request.auth.uid
+        (resource.data.psychologistId == request.auth.uid &&
+         request.resource.data.psychologistId == resource.data.psychologistId) ||
+        (resource.data.userId == request.auth.uid &&
+         request.resource.data.userId == resource.data.userId &&
+         request.resource.data.psychologistId == resource.data.psychologistId)
       );
       allow delete: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
     }
 
-    // APPOINTMENTS
-    // Strictly isolated to the participating psychologist and patient
+    // APPOINTMENTS (Hardening Etapa 2)
+    // - Psychologist and patient only access sessions they participate in.
+    // - Core fields immutable on update: psychologistId, patientId, patientUserId, clinicId, roomId.
+    // - Patients CANNOT set administrative statuses (confirmed, completed, no_show, rejected).
+    //   Patients can ONLY cancel or request cancellation.
+    // - Psychologists can confirm, reject, complete or mark no_show.
     match /appointments/{appId} {
-      allow get, list: if isSignedIn() && (
+      allow get: if isSignedIn() && (
         resource.data.psychologistId == request.auth.uid ||
         resource.data.patientUserId == request.auth.uid ||
         resource.data.patientId == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        resource.data.psychologistId == request.auth.uid ||
+        resource.data.patientUserId == request.auth.uid
       );
       allow create: if isSignedIn() && (
-        request.resource.data.patientUserId == request.auth.uid ||
-        request.resource.data.psychologistId == request.auth.uid
+        (request.resource.data.psychologistId == request.auth.uid) ||
+        (request.resource.data.patientUserId == request.auth.uid &&
+         request.resource.data.status == 'pending' &&
+         request.resource.data.requestedBy == 'patient')
       );
       allow update: if isSignedIn() && (
-        resource.data.psychologistId == request.auth.uid ||
-        resource.data.patientUserId == request.auth.uid ||
-        resource.data.patientId == request.auth.uid
+        request.resource.data.psychologistId == resource.data.psychologistId &&
+        request.resource.data.patientId == resource.data.patientId &&
+        request.resource.data.patientUserId == resource.data.patientUserId &&
+        request.resource.data.clinicId == resource.data.clinicId &&
+        request.resource.data.roomId == resource.data.roomId && (
+          // Case 1: Treating Psychologist update
+          (resource.data.psychologistId == request.auth.uid) ||
+          // Case 2: Participating Patient update
+          (resource.data.patientUserId == request.auth.uid &&
+           request.resource.data.status in ['cancelled', 'cancellation_requested', resource.data.status] &&
+           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'cancellationReason', 'notes', 'updatedAt']))
+        )
       );
       allow delete: if isSignedIn() && (
         resource.data.psychologistId == request.auth.uid ||
-        resource.data.patientUserId == request.auth.uid
+        (resource.data.patientUserId == request.auth.uid && resource.data.status == 'pending')
       );
     }
 
     // CLINICAL RECORDS (STRICT SIGILO PROFISSIONAL / CFP nº 01/2009 / LGPD Artigo 11)
     // STRICTEST RULE: Only the treating psychologist who owns the record can access it.
     // SuperAdmin, Clinic Managers, Receptionists and Patients are STRICTLY DENIED read and write.
+    // Validates legitimate link: patient must exist and belong to this psychologist.
+    // psychologistId and patientId are STRICTLY IMMUTABLE on update.
     match /clinical_records/{recordId} {
       allow get, list: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
-      allow create: if isSignedIn() && request.resource.data.psychologistId == request.auth.uid;
-      allow update: if isSignedIn() && resource.data.psychologistId == request.auth.uid &&
-        request.resource.data.psychologistId == resource.data.psychologistId;
+      allow create: if isSignedIn() &&
+        request.resource.data.psychologistId == request.auth.uid &&
+        request.resource.data.patientId is string &&
+        request.resource.data.patientId.size() > 0 &&
+        exists(/databases/$(database)/documents/patients/$(request.resource.data.patientId)) &&
+        get(/databases/$(database)/documents/patients/$(request.resource.data.patientId)).data.psychologistId == request.auth.uid;
+      allow update: if isSignedIn() &&
+        resource.data.psychologistId == request.auth.uid &&
+        request.resource.data.psychologistId == resource.data.psychologistId &&
+        request.resource.data.patientId == resource.data.patientId;
       allow delete: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
     }
 
@@ -127,7 +167,8 @@ service cloud.firestore {
         resource.data.patientUserId == request.auth.uid
       );
       allow create: if isSignedIn() && request.resource.data.psychologistId == request.auth.uid;
-      allow update: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.psychologistId == request.auth.uid &&
+        request.resource.data.psychologistId == resource.data.psychologistId;
       allow delete: if isSuperAdmin();
     }
 
@@ -137,17 +178,38 @@ service cloud.firestore {
       allow update, delete: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
     }
 
-    // SUBSCRIPTIONS & PLANS
+    // SUBSCRIPTIONS & PLANS (Multi-tenant SaaS isolation)
+    // Hardening Etapa 2: A client cannot consult another client's subscription.
+    // No blanket listing. Only target user/clinic or superadmin.
     match /subscriptions/{subId} {
-      allow get, list: if isSignedIn();
-      allow write: if isSuperAdmin();
+      allow get: if isSignedIn() && (
+        resource.data.targetId == request.auth.uid ||
+        resource.data.userId == request.auth.uid ||
+        isSuperAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.targetId == request.auth.uid ||
+        resource.data.userId == request.auth.uid ||
+        isSuperAdmin()
+      );
+      allow create, update, delete: if isSuperAdmin();
     }
 
-    // NOTIFICATIONS: strictly isolated to recipient user
+    // NOTIFICATIONS (Hardening Etapa 2)
+    // - Recipient validated: recipientUserId == request.auth.uid for read/update/delete.
+    // - Anti-spoofing: senderId must match authenticated user or cannot forge another sender.
+    // - recipientUserId is STRICTLY IMMUTABLE.
+    // - Updates restricted to read status and updatedAt.
     match /notifications/{notifId} {
       allow get, list: if isSignedIn() && resource.data.recipientUserId == request.auth.uid;
-      allow create: if isSignedIn();
-      allow update: if isSignedIn() && resource.data.recipientUserId == request.auth.uid;
+      allow create: if isSignedIn() &&
+        request.resource.data.recipientUserId is string &&
+        request.resource.data.recipientUserId.size() > 0 &&
+        (request.resource.data.senderId == request.auth.uid || !('senderId' in request.resource.data));
+      allow update: if isSignedIn() &&
+        resource.data.recipientUserId == request.auth.uid &&
+        request.resource.data.recipientUserId == resource.data.recipientUserId &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'updatedAt']);
       allow delete: if isSignedIn() && resource.data.recipientUserId == request.auth.uid;
     }
 

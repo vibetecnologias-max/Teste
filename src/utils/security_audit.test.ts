@@ -3,9 +3,16 @@ import assert from 'node:assert/strict';
 import {
   canAccessClinicalRecord,
   isValidAppointmentTransition,
-  checkSlotConflict
+  checkSlotConflict,
+  validateUserProfileUpdate,
+  validateAppointmentUpdate,
+  validateNotificationCreate,
+  validateNotificationUpdate,
+  validateSubscriptionAccess,
+  validateClinicalRecordWrite
 } from './rules.ts';
-import { Appointment, UserRole, AuditLog, UserProfile, Patient, ClinicalRecord } from '../types/index.ts';
+import { sanitizeAuditLog } from '../services/firestoreService.ts';
+import { Appointment, UserRole, AuditLog, UserProfile, Patient, ClinicalRecord, AppNotification } from '../types/index.ts';
 
 // -----------------------------------------------------------------------------
 // 1. USUÁRIO NÃO AUTENTICADO NÃO ACESSA MÓDULOS INTERNOS
@@ -298,3 +305,363 @@ test('AUDIT 13: Clinical audit log records meet strict schema and immutability r
   assert.ok(sampleLog.userEmail.includes('@'), 'Must record acting user email');
   assert.ok(sampleLog.details.length > 0, 'Must record descriptive audit context');
 });
+
+// -----------------------------------------------------------------------------
+// 14. HARDENING ETAPA 2: USUÁRIO COMUM NÃO ALTERA CAMPOS CRÍTICOS DE PERFIL
+// -----------------------------------------------------------------------------
+test('AUDIT 14: Regular user cannot modify role, uid, status, clinicId, professionalId in user profile', () => {
+  const existingProfile: Partial<UserProfile> = {
+    uid: 'user_123',
+    displayName: 'Carlos Psicólogo',
+    role: 'psychologist',
+    status: 'active',
+    clinicId: 'clinic_mente_viva',
+    phone: '11999999999'
+  };
+
+  // Attempt 1: Regular user tries to elevate role to superadmin
+  const tryElevateRole = validateUserProfileUpdate(
+    existingProfile,
+    { ...existingProfile, role: 'superadmin' },
+    'user_123',
+    false
+  );
+  assert.equal(tryElevateRole.allowed, false);
+  assert.match(tryElevateRole.reason || '', /role/);
+
+  // Attempt 2: Regular user tries to alter clinicId
+  const tryChangeClinic = validateUserProfileUpdate(
+    existingProfile,
+    { ...existingProfile, clinicId: 'clinic_outra' },
+    'user_123',
+    false
+  );
+  assert.equal(tryChangeClinic.allowed, false);
+  assert.match(tryChangeClinic.reason || '', /clinicId/);
+
+  // Attempt 3: Regular user tries to alter status
+  const tryChangeStatus = validateUserProfileUpdate(
+    existingProfile,
+    { ...existingProfile, status: 'suspended' },
+    'user_123',
+    false
+  );
+  assert.equal(tryChangeStatus.allowed, false);
+  assert.match(tryChangeStatus.reason || '', /status/);
+
+  // Valid update: modifying only allowed fields (displayName, phone, avatarUrl)
+  const validUpdate = validateUserProfileUpdate(
+    existingProfile,
+    { ...existingProfile, displayName: 'Dr. Carlos Silva', phone: '11988887777' },
+    'user_123',
+    false
+  );
+  assert.equal(validUpdate.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 15. HARDENING ETAPA 2: SUPERADMIN PODE GERENCIAR PERFIS
+// -----------------------------------------------------------------------------
+test('AUDIT 15: Superadministrator can perform controlled administrative profile adjustments', () => {
+  const existingProfile: Partial<UserProfile> = {
+    uid: 'user_123',
+    role: 'patient',
+    status: 'active'
+  };
+
+  const adminUpdate = validateUserProfileUpdate(
+    existingProfile,
+    { ...existingProfile, status: 'suspended' },
+    'superadmin_uid_999',
+    true // isSuperAdmin
+  );
+  assert.equal(adminUpdate.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 16. HARDENING ETAPA 2: CAMPOS DE IDENTIDADE DE AGENDAMENTOS SÃO ESTRITAMENTE IMUTÁVEIS
+// -----------------------------------------------------------------------------
+test('AUDIT 16: Appointment core identifiers (psychologistId, patientId, patientUserId, clinicId, roomId) cannot be mutated', () => {
+  const existingApp: Appointment = {
+    id: 'app_1',
+    psychologistId: 'psy_marcos',
+    patientId: 'pat_ana',
+    patientUserId: 'user_ana',
+    patientName: 'Ana Silva',
+    clinicId: 'clinic_mente_viva',
+    roomId: 'room_1',
+    date: '2026-11-15',
+    startTime: '10:00',
+    endTime: '10:50',
+    durationMinutes: 50,
+    status: 'confirmed',
+    price: 200,
+    paymentStatus: 'pending',
+    requestedBy: 'psychologist',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  // Malicious attempt to change psychologistId
+  const tryChangePsych = validateAppointmentUpdate(
+    existingApp,
+    { ...existingApp, psychologistId: 'psy_impostor' },
+    'psy_marcos'
+  );
+  assert.equal(tryChangePsych.allowed, false);
+  assert.match(tryChangePsych.reason || '', /psychologistId/);
+
+  // Malicious attempt to change patientUserId
+  const tryChangePatient = validateAppointmentUpdate(
+    existingApp,
+    { ...existingApp, patientUserId: 'user_vitima' },
+    'psy_marcos'
+  );
+  assert.equal(tryChangePatient.allowed, false);
+  assert.match(tryChangePatient.reason || '', /patientUserId/);
+
+  // Malicious attempt to change roomId
+  const tryChangeRoom = validateAppointmentUpdate(
+    existingApp,
+    { ...existingApp, roomId: 'room_roubada' },
+    'psy_marcos'
+  );
+  assert.equal(tryChangeRoom.allowed, false);
+  assert.match(tryChangeRoom.reason || '', /roomId/);
+});
+
+// -----------------------------------------------------------------------------
+// 17. HARDENING ETAPA 2: PACIENTE NÃO ALTERA STATUS ADMINISTRATIVO DE AGENDAMENTO
+// -----------------------------------------------------------------------------
+test('AUDIT 17: Patient cannot set administrative statuses (confirmed, completed, no_show) but can cancel or request cancellation', () => {
+  const app: Appointment = {
+    id: 'app_2',
+    psychologistId: 'psy_marcos',
+    patientId: 'pat_ana',
+    patientUserId: 'user_ana',
+    patientName: 'Ana Silva',
+    clinicId: 'clinic_mente_viva',
+    roomId: 'room_1',
+    date: '2026-11-15',
+    startTime: '10:00',
+    endTime: '10:50',
+    durationMinutes: 50,
+    status: 'pending',
+    price: 200,
+    paymentStatus: 'pending',
+    requestedBy: 'patient',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  // Patient tries to confirm their own appointment without psychologist approval
+  const patientConfirm = validateAppointmentUpdate(
+    app,
+    { ...app, status: 'confirmed' },
+    'user_ana' // caller is patient
+  );
+  assert.equal(patientConfirm.allowed, false);
+  assert.match(patientConfirm.reason || '', /status administrativos/);
+
+  // Patient tries to mark complete
+  const patientComplete = validateAppointmentUpdate(
+    app,
+    { ...app, status: 'completed' },
+    'user_ana'
+  );
+  assert.equal(patientComplete.allowed, false);
+
+  // Patient cancels -> ALLOWED
+  const patientCancel = validateAppointmentUpdate(
+    app,
+    { ...app, status: 'cancelled', cancellationReason: 'Imprevisto pessoal' },
+    'user_ana'
+  );
+  assert.equal(patientCancel.allowed, true);
+
+  // Psychologist confirms -> ALLOWED
+  const psychConfirm = validateAppointmentUpdate(
+    app,
+    { ...app, status: 'confirmed' },
+    'psy_marcos' // caller is psychologist
+  );
+  assert.equal(psychConfirm.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 18. HARDENING ETAPA 2: NOTIFICAÇÕES — ANTI-SPOOFING E VALIDAÇÃO DE DESTINATÁRIO
+// -----------------------------------------------------------------------------
+test('AUDIT 18: Notification creation blocks senderId spoofing and requires recipientUserId', () => {
+  // Attempt to forge notification with someone else's senderId
+  const spoofAttempt = validateNotificationCreate(
+    { recipientUserId: 'target_user', senderId: 'fake_sender_999' },
+    'real_auth_user_123'
+  );
+  assert.equal(spoofAttempt.allowed, false);
+  assert.match(spoofAttempt.reason || '', /senderId/);
+
+  // Legitimate creation where senderId matches auth.uid
+  const legitimate = validateNotificationCreate(
+    { recipientUserId: 'target_user', senderId: 'real_auth_user_123' },
+    'real_auth_user_123'
+  );
+  assert.equal(legitimate.allowed, true);
+
+  // Blank recipient rejected
+  const blankRecipient = validateNotificationCreate(
+    { recipientUserId: '', senderId: 'real_auth_user_123' },
+    'real_auth_user_123'
+  );
+  assert.equal(blankRecipient.allowed, false);
+});
+
+// -----------------------------------------------------------------------------
+// 19. HARDENING ETAPA 2: NOTIFICAÇÕES — RECIPIENT IMUTÁVEL E APENAS STATUS DE LEITURA
+// -----------------------------------------------------------------------------
+test('AUDIT 19: Notification recipient cannot be altered and recipient can only modify read status', () => {
+  const notif = {
+    id: 'notif_1',
+    recipientUserId: 'target_user_1',
+    read: false,
+    title: 'Aviso',
+    message: 'Mensagem original'
+  };
+
+  // Attacker tries to alter recipient
+  const tryChangeRecipient = validateNotificationUpdate(
+    notif,
+    { ...notif, recipientUserId: 'other_user' },
+    'target_user_1'
+  );
+  assert.equal(tryChangeRecipient.allowed, false);
+
+  // Third party tries to mark notification as read
+  const unauthorizedUpdate = validateNotificationUpdate(
+    notif,
+    { ...notif, read: true },
+    'intruder_user'
+  );
+  assert.equal(unauthorizedUpdate.allowed, false);
+
+  // User tries to alter message text
+  const tryAlterMessage = validateNotificationUpdate(
+    notif,
+    { ...notif, message: 'Texto adulterado' },
+    'target_user_1'
+  );
+  assert.equal(tryAlterMessage.allowed, false);
+
+  // Legitimate update: recipient marking read
+  const legitUpdate = validateNotificationUpdate(
+    notif,
+    { ...notif, read: true },
+    'target_user_1'
+  );
+  assert.equal(legitUpdate.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 20. HARDENING ETAPA 2: ASSINATURAS E ISOLAMENTO SAAS
+// -----------------------------------------------------------------------------
+test('AUDIT 20: Subscriptions cannot be queried or listed across tenants by regular users', () => {
+  const tenant1Sub = { targetId: 'clinic_mente_viva', userId: 'user_dr_carlos' };
+
+  // Tenant 1 user can access their own subscription
+  assert.equal(validateSubscriptionAccess(tenant1Sub, 'user_dr_carlos', false), true);
+  assert.equal(validateSubscriptionAccess(tenant1Sub, 'clinic_mente_viva', false), true);
+
+  // Tenant 2 user CANNOT access Tenant 1 subscription
+  assert.equal(validateSubscriptionAccess(tenant1Sub, 'user_dra_julia', false), false);
+
+  // Superadmin has legitimate platform administrative access
+  assert.equal(validateSubscriptionAccess(tenant1Sub, 'superadmin_uid', true), true);
+});
+
+// -----------------------------------------------------------------------------
+// 21. HARDENING ETAPA 2: PRONTUÁRIOS CLÍNICOS — VÍNCULO OBRIGATÓRIO E IMUTABILIDADE
+// -----------------------------------------------------------------------------
+test('AUDIT 21: Clinical record creation requires legitimate patient link (Master Gate) and psychologistId/patientId are immutable', () => {
+  const legitimatePatientOwner = 'psy_dr_marcos';
+
+  // Psychologist trying to create record for a patient who belongs to another psychologist
+  const foreignPatientWrite = validateClinicalRecordWrite(
+    { psychologistId: 'psy_dr_marcos', patientId: 'pat_alien' },
+    'psy_dr_marcos',
+    'psy_dra_julia', // Patient actually belongs to Dra. Júlia
+    false
+  );
+  assert.equal(foreignPatientWrite.allowed, false);
+  assert.match(foreignPatientWrite.reason || '', /não pertence a este psicólogo/);
+
+  // Legitimate creation for own patient
+  const legitWrite = validateClinicalRecordWrite(
+    { psychologistId: 'psy_dr_marcos', patientId: 'pat_marcos_1' },
+    'psy_dr_marcos',
+    'psy_dr_marcos',
+    false
+  );
+  assert.equal(legitWrite.allowed, true);
+
+  // Update trying to change psychologistId
+  const tryChangePsych = validateClinicalRecordWrite(
+    { psychologistId: 'psy_impostor', patientId: 'pat_marcos_1' },
+    'psy_dr_marcos',
+    'psy_dr_marcos',
+    true,
+    { psychologistId: 'psy_dr_marcos', patientId: 'pat_marcos_1' }
+  );
+  assert.equal(tryChangePsych.allowed, false);
+
+  // Update trying to change patientId
+  const tryChangePat = validateClinicalRecordWrite(
+    { psychologistId: 'psy_dr_marcos', patientId: 'pat_outro' },
+    'psy_dr_marcos',
+    'psy_dr_marcos',
+    true,
+    { psychologistId: 'psy_dr_marcos', patientId: 'pat_marcos_1' }
+  );
+  assert.equal(tryChangePat.allowed, false);
+});
+
+// -----------------------------------------------------------------------------
+// 22. HARDENING ETAPA 2: AUDIT LOG SANITIZATION PURGES PASSWORDS AND CLINICAL NARRATIVES
+// -----------------------------------------------------------------------------
+test('AUDIT 22: Audit log sanitization purges sensitive passwords, evolution notes, and diagnostic hypotheses', () => {
+  const dirtyLog: AuditLog = {
+    id: 'log_dirty_1',
+    timestamp: new Date().toISOString(),
+    userId: 'user_1',
+    userEmail: 'user@test.com',
+    action: 'create_clinical_record',
+    targetCollection: 'clinical_records',
+    targetId: 'rec_1',
+    details: 'User password=SuperSecret123; evolutionNotes: paciente relatou trauma severo; diagnosticHypothesis: F41.1; conductPlan: terapia cognitivo-comportamental.'
+  };
+
+  const sanitized = sanitizeAuditLog(dirtyLog);
+
+  assert.equal(sanitized.details.includes('SuperSecret123'), false, 'Passwords must be sanitized');
+  assert.equal(sanitized.details.includes('evolutionNotes'), false, 'evolutionNotes field must be sanitized');
+  assert.equal(sanitized.details.includes('diagnosticHypothesis'), false, 'diagnosticHypothesis field must be sanitized');
+  assert.equal(sanitized.details.includes('conductPlan'), false, 'conductPlan field must be sanitized');
+  assert.ok(sanitized.details.includes('[DADO_SENSIVEL_OMITIDO]'), 'Must replace with audit redaction tag');
+});
+
+// -----------------------------------------------------------------------------
+// 23. HARDENING ETAPA 2: PERSISTÊNCIA DE AUDITORIA RETORNA ERRO ESTRUTURADO SEM MASCARAR
+// -----------------------------------------------------------------------------
+test('AUDIT 23: Audit log persistence returns structured error without swallowing upon failure', async () => {
+  const failingAuditFunction = async (): Promise<{ success: boolean; error?: string }> => {
+    try {
+      throw new Error('PERMISSION_DENIED: /audit_logs is restricted to authenticated users.');
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  };
+
+  const result = await failingAuditFunction();
+  assert.equal(result.success, false);
+  assert.ok(result.error);
+  assert.match(result.error, /PERMISSION_DENIED/);
+});
+

@@ -1,4 +1,4 @@
-import { Appointment, AppointmentStatus, PaymentRecord, ExpenseRecord, UserRole } from '../types';
+import { Appointment, AppointmentStatus, PaymentRecord, ExpenseRecord, UserRole, UserProfile } from '../types';
 
 /**
  * Converts a time string "HH:mm" to total minutes from midnight.
@@ -205,4 +205,181 @@ export function computeOpenTimeSlots(
   }
 
   return slots;
+}
+
+/**
+ * Validates Firestore rules for updating user profiles (/users/{userId}).
+ * Regular users are strictly forbidden from modifying role, uid, status, clinicId, professionalId.
+ */
+export function validateUserProfileUpdate(
+  existingUser: Partial<UserProfile>,
+  incomingUser: Partial<UserProfile>,
+  callerUid: string,
+  isCallerSuperAdmin: boolean = false
+): { allowed: boolean; reason?: string } {
+  if (!callerUid) return { allowed: false, reason: 'Não autenticado.' };
+  if (isCallerSuperAdmin) return { allowed: true };
+
+  if (existingUser.uid !== callerUid) {
+    return { allowed: false, reason: 'Usuário não pode alterar perfis de terceiros.' };
+  }
+
+  // Compare all keys changed
+  const allowedKeys = new Set(['displayName', 'phone', 'avatarUrl', 'photoURL', 'updatedAt']);
+  const allKeys = new Set([...Object.keys(existingUser), ...Object.keys(incomingUser)]);
+
+  for (const key of allKeys) {
+    const valExisting = (existingUser as any)[key];
+    const valIncoming = (incomingUser as any)[key];
+
+    if (valExisting !== valIncoming) {
+      if (!allowedKeys.has(key)) {
+        return {
+          allowed: false,
+          reason: `Alteração não autorizada no campo restrito: ${key}. Usuários comuns não podem alterar papéis ou vínculos administrativos.`
+        };
+      }
+    }
+  }
+
+  return { allowed: true };
+}
+
+/**
+ * Validates Firestore rules for updating appointments (/appointments/{appId}).
+ * Core fields are immutable. Patients cannot perform administrative state transitions.
+ */
+export function validateAppointmentUpdate(
+  existing: Appointment,
+  incoming: Appointment,
+  callerUid: string
+): { allowed: boolean; reason?: string } {
+  if (!callerUid) return { allowed: false, reason: 'Não autenticado.' };
+
+  // Core immutable fields
+  if (existing.psychologistId !== incoming.psychologistId) {
+    return { allowed: false, reason: 'psychologistId é imutável após criação.' };
+  }
+  if (existing.patientId !== incoming.patientId) {
+    return { allowed: false, reason: 'patientId é imutável após criação.' };
+  }
+  if (existing.patientUserId !== incoming.patientUserId) {
+    return { allowed: false, reason: 'patientUserId é imutável após criação.' };
+  }
+  if (existing.clinicId !== incoming.clinicId) {
+    return { allowed: false, reason: 'clinicId é imutável após criação.' };
+  }
+  if (existing.roomId !== incoming.roomId) {
+    return { allowed: false, reason: 'roomId é imutável após criação.' };
+  }
+
+  // Caller is treating psychologist
+  if (callerUid === existing.psychologistId) {
+    return { allowed: true };
+  }
+
+  // Caller is participating patient
+  if (callerUid === existing.patientUserId) {
+    const prohibitedStatuses = ['confirmed', 'completed', 'no_show', 'rejected'];
+    if (prohibitedStatuses.includes(incoming.status) && incoming.status !== existing.status) {
+      return { allowed: false, reason: 'Paciente não tem autorização para definir status administrativos.' };
+    }
+
+    // Patient can only affect status (to cancelled or cancellation_requested), cancellationReason, notes, updatedAt
+    const allowedPatientFields = new Set(['status', 'cancellationReason', 'notes', 'updatedAt']);
+    for (const key of Object.keys(incoming) as (keyof Appointment)[]) {
+      if (incoming[key] !== existing[key] && !allowedPatientFields.has(key)) {
+        return { allowed: false, reason: `Paciente não pode alterar o campo ${key}.` };
+      }
+    }
+
+    return { allowed: true };
+  }
+
+  return { allowed: false, reason: 'Usuário não tem autorização para modificar este agendamento.' };
+}
+
+/**
+ * Validates notification create & update security rules.
+ */
+export function validateNotificationCreate(
+  incoming: { recipientUserId: string; senderId?: string },
+  callerUid: string
+): { allowed: boolean; reason?: string } {
+  if (!callerUid) return { allowed: false, reason: 'Não autenticado.' };
+  if (!incoming.recipientUserId || incoming.recipientUserId.trim() === '') {
+    return { allowed: false, reason: 'recipientUserId é obrigatório.' };
+  }
+  if (incoming.senderId && incoming.senderId !== callerUid) {
+    return { allowed: false, reason: 'Anti-spoofing: senderId deve coincidir com o usuário autenticado.' };
+  }
+  return { allowed: true };
+}
+
+export function validateNotificationUpdate(
+  existing: { recipientUserId: string; read: boolean },
+  incoming: { recipientUserId: string; read: boolean; [key: string]: any },
+  callerUid: string
+): { allowed: boolean; reason?: string } {
+  if (!callerUid) return { allowed: false, reason: 'Não autenticado.' };
+  if (existing.recipientUserId !== callerUid) {
+    return { allowed: false, reason: 'Apenas o destinatário pode atualizar suas notificações.' };
+  }
+  if (incoming.recipientUserId !== existing.recipientUserId) {
+    return { allowed: false, reason: 'recipientUserId é imutável.' };
+  }
+  // Check if non-allowed keys were touched
+  for (const k of Object.keys(incoming)) {
+    if (k !== 'read' && k !== 'updatedAt' && (incoming as any)[k] !== (existing as any)[k]) {
+      return { allowed: false, reason: `Campo ${k} não pode ser alterado em notificações.` };
+    }
+  }
+  return { allowed: true };
+}
+
+/**
+ * Validates subscription isolation rules.
+ */
+export function validateSubscriptionAccess(
+  sub: { targetId: string; userId?: string },
+  callerUid: string,
+  isSuperAdmin: boolean = false
+): boolean {
+  if (!callerUid) return false;
+  if (isSuperAdmin) return true;
+  return sub.targetId === callerUid || sub.userId === callerUid;
+}
+
+/**
+ * Validates clinical record creation and update.
+ * Strictly verifies treating psychologist ownership and patient linkage.
+ */
+export function validateClinicalRecordWrite(
+  record: { psychologistId: string; patientId: string },
+  callerUid: string,
+  patientOwnerPsychologistId: string,
+  isUpdate: boolean,
+  existingRecord?: { psychologistId: string; patientId: string }
+): { allowed: boolean; reason?: string } {
+  if (!callerUid) return { allowed: false, reason: 'Não autenticado.' };
+
+  if (record.psychologistId !== callerUid) {
+    return { allowed: false, reason: 'Apenas o psicólogo titular responsável pode registrar prontuários.' };
+  }
+
+  // Master Gate: patient must belong to this psychologist
+  if (patientOwnerPsychologistId !== callerUid) {
+    return { allowed: false, reason: 'Vínculo inválido: o paciente não pertence a este psicólogo.' };
+  }
+
+  if (isUpdate && existingRecord) {
+    if (record.psychologistId !== existingRecord.psychologistId) {
+      return { allowed: false, reason: 'psychologistId é imutável em prontuários clínicos.' };
+    }
+    if (record.patientId !== existingRecord.patientId) {
+      return { allowed: false, reason: 'patientId é imutável em prontuários clínicos.' };
+    }
+  }
+
+  return { allowed: true };
 }
