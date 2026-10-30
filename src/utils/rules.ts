@@ -116,16 +116,13 @@ export function isValidAppointmentTransition(
 
 /**
  * Evaluates whether a user role has ethical authorization to access clinical records.
- * STRICT: Only treating psychologist or superadmin audit can access.
- * Clinic managers and patients are strictly denied access to sensitive clinical evolution.
+ * STRICT (CFP nº 01/2009 & LGPD): Only the treating psychologist responsible for the care has access.
+ * SuperAdmin, clinic managers, and patients are strictly denied access.
  */
 export function canAccessClinicalRecord(
   requestUser: { uid: string; role: UserRole },
   record: { psychologistId: string }
 ): boolean {
-  if (requestUser.role === 'superadmin') {
-    return true;
-  }
   if (requestUser.role === 'psychologist' && requestUser.uid === record.psychologistId) {
     return true;
   }

@@ -37,6 +37,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const { currentUser } = useApp();
 
+  if (!currentUser) return null;
+
   const handleSelect = (tab: string) => {
     onSelectTab(tab);
     onCloseMobile();

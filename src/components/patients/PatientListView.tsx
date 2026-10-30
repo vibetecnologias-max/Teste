@@ -40,6 +40,8 @@ export const PatientListView: React.FC<PatientListViewProps> = ({ onOpenClinical
   const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
   const [notes, setNotes] = useState('');
 
+  if (!currentUser) return null;
+
   const filteredPatients = patients.filter(p => {
     if (filterStatus !== 'all' && p.status !== filterStatus) return false;
     if (searchTerm) {

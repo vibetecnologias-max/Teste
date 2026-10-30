@@ -45,6 +45,8 @@ export const PatientPortalView: React.FC<PatientPortalViewProps> = ({ initialTab
   const [bookingError, setBookingError] = useState<string | null>(null);
   const [pixCopied, setPixCopied] = useState(false);
 
+  if (!currentUser) return null;
+
   // Filter patient's appointments
   const myAppointments = appointments.filter(a =>
     a.patientUserId === currentUser.uid || a.patientName === currentUser.displayName

@@ -16,15 +16,17 @@ import { ClinicManagementView } from './components/clinic/ClinicManagementView';
 import { PatientPortalView } from './components/patient_portal/PatientPortalView';
 import { SuperAdminView } from './components/admin/SuperAdminView';
 import { AvailabilitySettings } from './components/availability/AvailabilitySettings';
+import { AuthScreen } from './components/auth/AuthScreen';
 
 const MainLayout: React.FC = () => {
-  const { currentUser } = useApp();
+  const { currentUser, loginUser } = useApp();
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [initialPatientForClinical, setInitialPatientForClinical] = useState<string | undefined>(undefined);
 
-  // Sync default tab when user switches role
+  // Sync default tab when user switches role or signs in
   useEffect(() => {
+    if (!currentUser) return;
     switch (currentUser.role) {
       case 'psychologist':
         setCurrentTab('dashboard');
@@ -39,7 +41,12 @@ const MainLayout: React.FC = () => {
         setCurrentTab('saas_overview');
         break;
     }
-  }, [currentUser.role]);
+  }, [currentUser?.role]);
+
+  // If not authenticated, render login/registration screen
+  if (!currentUser) {
+    return <AuthScreen onAuthenticated={loginUser} />;
+  }
 
   const handleOpenClinicalRecords = (patientId: string) => {
     setInitialPatientForClinical(patientId);

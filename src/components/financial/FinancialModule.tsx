@@ -48,6 +48,8 @@ export const FinancialModule: React.FC = () => {
   const [expStatus, setExpStatus] = useState<'paid' | 'pending'>('paid');
   const [expMethod, setExpMethod] = useState('Pix');
 
+  if (!currentUser) return null;
+
   const summary = calculateFinancialSummary(payments, expenses);
 
   const filteredPayments = payments.filter(p => {

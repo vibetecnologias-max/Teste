@@ -47,6 +47,8 @@ export const ScheduleCalendar: React.FC = () => {
   const [formNotes, setFormNotes] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
 
+  if (!currentUser) return null;
+
   const filteredAppointments = appointments.filter(a => {
     if (filterRoom !== 'all' && a.roomId !== filterRoom) return false;
     return true;

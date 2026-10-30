@@ -30,6 +30,7 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
   } = useApp();
 
   // Check access permission: Only psychologist or superadmin
+  if (!currentUser) return null;
   const hasAccess = currentUser.role === 'psychologist' || currentUser.role === 'superadmin';
 
   const [selectedPatientId, setSelectedPatientId] = useState<string>(

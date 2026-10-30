@@ -108,8 +108,8 @@ test('canAccessClinicalRecord strictly enforces CFP and LGPD privacy', () => {
   // Patient cannot view internal clinical records!
   assert.equal(canAccessClinicalRecord({ uid: 'paciente-ana', role: 'patient' }, record), false);
 
-  // SuperAdmin has system audit access
-  assert.equal(canAccessClinicalRecord({ uid: 'admin-1', role: 'superadmin' }, record), true);
+  // SuperAdmin also CANNOT view private clinical records (Resolution CFP nº 01/2009)
+  assert.equal(canAccessClinicalRecord({ uid: 'admin-1', role: 'superadmin' }, record), false);
 });
 
 test('calculateFinancialSummary calculates correct totals and balance', () => {

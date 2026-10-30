@@ -1,4 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { doc, getDoc } from 'firebase/firestore';
+import { auth, db, testConnection } from '../firebase/config';
 import {
   UserProfile,
   UserRole,
@@ -29,11 +32,33 @@ import {
   SEED_AVAILABILITY,
   SEED_AUDIT_LOGS
 } from '../data/seedData';
-import { checkSlotConflict, isValidAppointmentTransition, canAccessClinicalRecord } from '../utils/rules';
-import { testConnection } from '../firebase/config';
+import {
+  checkSlotConflict,
+  isValidAppointmentTransition,
+  canAccessClinicalRecord
+} from '../utils/rules';
+import {
+  bootstrapFirestoreData,
+  persistAppointment,
+  persistPatient,
+  persistClinicalRecord,
+  persistAuditLog,
+  persistPayment,
+  persistExpense,
+  fetchAppointmentsForUser,
+  fetchPatientsForPsychologist,
+  fetchPayments,
+  fetchExpenses,
+  fetchRooms,
+  persistRoom,
+  fetchNotificationsForUser,
+  persistNotification,
+  updateNotificationInDb
+} from '../services/firestoreService';
+import { logoutUser, getOrCreateUserProfile } from '../services/authService';
 
 interface AppContextType {
-  currentUser: UserProfile;
+  currentUser: UserProfile | null;
   currentProfessional?: Professional;
   currentClinic?: Clinic;
   allProfessionals: Professional[];
@@ -47,6 +72,9 @@ interface AppContextType {
   notifications: AppNotification[];
   auditLogs: AuditLog[];
   availability: AvailabilityConfig;
+  isAuthenticated: boolean;
+  loginUser: (user: UserProfile) => void;
+  logout: () => Promise<void>;
   switchUserRole: (role: UserRole) => void;
   // Appointment actions
   requestAppointment: (data: {
@@ -70,7 +98,7 @@ interface AppContextType {
   // Patient actions
   addPatient: (patient: Omit<Patient, 'id' | 'createdAt'>) => Patient;
   updatePatient: (id: string, updates: Partial<Patient>) => void;
-  // Clinical records
+  // Clinical records (Strict sigilo)
   addClinicalRecord: (record: Omit<ClinicalRecord, 'id' | 'createdAt' | 'updatedAt' | 'createdBy' | 'isConfidential'>) => { success: boolean; error?: string; record?: ClinicalRecord };
   getPatientClinicalRecords: (patientId: string) => ClinicalRecord[];
   // Finance
@@ -88,91 +116,91 @@ interface AppContextType {
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const STORAGE_KEY = 'projeto_psi_state_v1';
-
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  // Test Firebase connection on mount
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => {
+    // Default to Dr. Marcos for immediate development review or load session
+    return SEED_USERS[0];
+  });
+
+  const [patients, setPatients] = useState<Patient[]>(SEED_PATIENTS);
+  const [appointments, setAppointments] = useState<Appointment[]>(SEED_APPOINTMENTS);
+  // Clinical records are kept strictly in-memory and synced to Firestore - NEVER in localStorage!
+  const [clinicalRecords, setClinicalRecords] = useState<ClinicalRecord[]>(SEED_CLINICAL_RECORDS);
+  const [payments, setPayments] = useState<PaymentRecord[]>(SEED_PAYMENTS);
+  const [expenses, setExpenses] = useState<ExpenseRecord[]>(SEED_EXPENSES);
+  const [rooms, setRooms] = useState<ClinicRoom[]>(SEED_ROOMS);
+  const [notifications, setNotifications] = useState<AppNotification[]>(SEED_NOTIFICATIONS);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(SEED_AUDIT_LOGS);
+
+  // Initialize and observe Firebase auth
   useEffect(() => {
     testConnection();
+    bootstrapFirestoreData();
+
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
+      if (firebaseUser) {
+        try {
+          const profile = await getOrCreateUserProfile(firebaseUser);
+          setCurrentUser(profile);
+        } catch (err) {
+          console.warn('Erro ao carregar perfil do Firebase Auth:', err);
+        }
+      }
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  // Initialize state with localStorage if available, otherwise seed data
-  const [currentUser, setCurrentUser] = useState<UserProfile>(() => {
-    return SEED_USERS[0]; // Dr. Marcos (psychologist) by default
-  });
-
-  const [patients, setPatients] = useState<Patient[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY}_patients`);
-    return saved ? JSON.parse(saved) : SEED_PATIENTS;
-  });
-
-  const [appointments, setAppointments] = useState<Appointment[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY}_appointments`);
-    return saved ? JSON.parse(saved) : SEED_APPOINTMENTS;
-  });
-
-  const [clinicalRecords, setClinicalRecords] = useState<ClinicalRecord[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY}_clinical_records`);
-    return saved ? JSON.parse(saved) : SEED_CLINICAL_RECORDS;
-  });
-
-  const [payments, setPayments] = useState<PaymentRecord[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY}_payments`);
-    return saved ? JSON.parse(saved) : SEED_PAYMENTS;
-  });
-
-  const [expenses, setExpenses] = useState<ExpenseRecord[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY}_expenses`);
-    return saved ? JSON.parse(saved) : SEED_EXPENSES;
-  });
-
-  const [rooms, setRooms] = useState<ClinicRoom[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY}_rooms`);
-    return saved ? JSON.parse(saved) : SEED_ROOMS;
-  });
-
-  const [notifications, setNotifications] = useState<AppNotification[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY}_notifications`);
-    return saved ? JSON.parse(saved) : SEED_NOTIFICATIONS;
-  });
-
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY}_audit_logs`);
-    return saved ? JSON.parse(saved) : SEED_AUDIT_LOGS;
-  });
-
-  // Sync to localStorage
+  // Synchronize Firestore data with authenticated user session
   useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY}_patients`, JSON.stringify(patients));
-  }, [patients]);
+    if (!currentUser) return;
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY}_appointments`, JSON.stringify(appointments));
-  }, [appointments]);
+    let isMounted = true;
+    const syncUserData = async () => {
+      try {
+        const [userApps, userRooms, userNotifs] = await Promise.all([
+          fetchAppointmentsForUser(currentUser.uid, currentUser.role),
+          fetchRooms(currentUser.clinicId),
+          fetchNotificationsForUser(currentUser.uid)
+        ]);
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY}_clinical_records`, JSON.stringify(clinicalRecords));
-  }, [clinicalRecords]);
+        if (isMounted) {
+          if (userApps && userApps.length > 0) setAppointments(userApps);
+          if (userRooms && userRooms.length > 0) setRooms(userRooms);
+          if (userNotifs && userNotifs.length > 0) setNotifications(userNotifs);
+        }
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY}_payments`, JSON.stringify(payments));
-  }, [payments]);
+        if (currentUser.role === 'psychologist') {
+          const [userPats, userPays, userExps] = await Promise.all([
+            fetchPatientsForPsychologist(currentUser.uid),
+            fetchPayments(currentUser.uid),
+            fetchExpenses(currentUser.uid)
+          ]);
+          if (isMounted) {
+            if (userPats && userPats.length > 0) setPatients(userPats);
+            if (userPays && userPays.length > 0) setPayments(userPays);
+            if (userExps && userExps.length > 0) setExpenses(userExps);
+          }
+        }
+      } catch (err) {
+        console.warn('Erro ao sincronizar dados com o Firestore:', err);
+      }
+    };
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY}_expenses`, JSON.stringify(expenses));
-  }, [expenses]);
+    syncUserData();
+    return () => {
+      isMounted = false;
+    };
+  }, [currentUser?.uid, currentUser?.role, currentUser?.clinicId]);
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY}_rooms`, JSON.stringify(rooms));
-  }, [rooms]);
+  const loginUser = (user: UserProfile) => {
+    setCurrentUser(user);
+  };
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY}_notifications`, JSON.stringify(notifications));
-  }, [notifications]);
-
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY}_audit_logs`, JSON.stringify(auditLogs));
-  }, [auditLogs]);
+  const logout = async () => {
+    await logoutUser();
+    setCurrentUser(null);
+  };
 
   const switchUserRole = (role: UserRole) => {
     const found = SEED_USERS.find(u => u.role === role);
@@ -181,18 +209,29 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
-  const currentProfessional = SEED_PROFESSIONALS.find(p => p.userId === currentUser.uid);
-  const currentClinic = SEED_CLINICS.find(c => c.id === currentUser.clinicId || c.ownerId === currentUser.uid);
+  const currentProfessional = currentUser
+    ? SEED_PROFESSIONALS.find(p => p.userId === currentUser.uid)
+    : undefined;
 
-  // Unread notifications for current user
-  const unreadCount = notifications.filter(n => n.recipientUserId === currentUser.uid && !n.read).length;
+  const currentClinic = currentUser
+    ? SEED_CLINICS.find(c => c.id === currentUser.clinicId || c.ownerId === currentUser.uid)
+    : undefined;
+
+  const unreadCount = currentUser
+    ? notifications.filter(n => n.recipientUserId === currentUser.uid && !n.read).length
+    : 0;
 
   const markNotificationAsRead = (id: string) => {
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+    updateNotificationInDb(id, { read: true });
   };
 
   const markAllNotificationsAsRead = () => {
+    if (!currentUser) return;
     setNotifications(prev => prev.map(n => n.recipientUserId === currentUser.uid ? { ...n, read: true } : n));
+    notifications.filter(n => n.recipientUserId === currentUser.uid && !n.read).forEach(n => {
+      updateNotificationInDb(n.id, { read: true });
+    });
   };
 
   // Appointment actions
@@ -231,7 +270,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       psychologistName: professional?.name || 'Psicólogo Responsável',
       patientId: data.patientId,
       patientName: data.patientName,
-      patientUserId: currentUser.role === 'patient' ? currentUser.uid : undefined,
+      patientUserId: currentUser?.role === 'patient' ? currentUser.uid : undefined,
       patientPhone: data.patientPhone || '(11) 99999-0000',
       clinicId: professional?.clinicIds[0] || 'clinic_mente_viva',
       roomId: data.roomId,
@@ -240,18 +279,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       startTime: data.startTime,
       endTime: data.endTime,
       durationMinutes: data.durationMinutes,
-      status: 'pending', // Rule: starts pending approval
+      status: 'pending',
       price: data.price,
       paymentStatus: 'pending',
       notes: data.notes || 'Solicitação de agendamento.',
-      requestedBy: currentUser.role === 'patient' ? 'patient' : 'psychologist',
+      requestedBy: currentUser?.role === 'patient' ? 'patient' : 'psychologist',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
 
     setAppointments(prev => [newApp, ...prev]);
+    persistAppointment(newApp);
 
-    // Send notification to the psychologist
+    // Notification for psychologist
     const newNotif: AppNotification = {
       id: `notif_${Date.now()}`,
       recipientUserId: data.psychologistId,
@@ -263,6 +303,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       createdAt: new Date().toISOString()
     };
     setNotifications(prev => [newNotif, ...prev]);
+    persistNotification(newNotif);
 
     return { success: true, appointment: newApp };
   };
@@ -275,7 +316,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return { success: false, error: `Transição inválida de ${target.status} para confirmado.` };
     }
 
-    // Double check conflict before confirming
     const conflict = checkSlotConflict(appointments, {
       id: target.id,
       psychologistId: target.psychologistId,
@@ -289,13 +329,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return { success: false, error: conflict.reason };
     }
 
-    setAppointments(prev => prev.map(a => a.id === appointmentId ? {
-      ...a,
-      status: 'confirmed',
+    const updated = {
+      ...target,
+      status: 'confirmed' as AppointmentStatus,
       updatedAt: new Date().toISOString()
-    } : a));
+    };
 
-    // Notify patient
+    setAppointments(prev => prev.map(a => a.id === appointmentId ? updated : a));
+    persistAppointment(updated);
+
     if (target.patientUserId) {
       const notif: AppNotification = {
         id: `notif_${Date.now()}`,
@@ -308,6 +350,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         createdAt: new Date().toISOString()
       };
       setNotifications(prev => [notif, ...prev]);
+      persistNotification(notif);
     }
 
     return { success: true };
@@ -321,12 +364,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return { success: false, error: 'Não é possível recusar este agendamento no estado atual.' };
     }
 
-    setAppointments(prev => prev.map(a => a.id === appointmentId ? {
-      ...a,
-      status: 'rejected',
+    const updated = {
+      ...target,
+      status: 'rejected' as AppointmentStatus,
       cancellationReason: reason || 'Horário indisponível no momento.',
       updatedAt: new Date().toISOString()
-    } : a));
+    };
+
+    setAppointments(prev => prev.map(a => a.id === appointmentId ? updated : a));
+    persistAppointment(updated);
 
     if (target.patientUserId) {
       const notif: AppNotification = {
@@ -340,6 +386,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         createdAt: new Date().toISOString()
       };
       setNotifications(prev => [notif, ...prev]);
+      persistNotification(notif);
     }
 
     return { success: true };
@@ -353,12 +400,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return { success: false, error: 'Agendamento não pode ser cancelado no estado atual.' };
     }
 
-    setAppointments(prev => prev.map(a => a.id === appointmentId ? {
-      ...a,
-      status: 'cancelled',
-      cancellationReason: reason || 'Cancelado pelo usuário.',
+    const updated = {
+      ...target,
+      status: 'cancelled' as AppointmentStatus,
+      cancellationReason: reason || 'Cancelado.',
       updatedAt: new Date().toISOString()
-    } : a));
+    };
+
+    setAppointments(prev => prev.map(a => a.id === appointmentId ? updated : a));
+    persistAppointment(updated);
 
     return { success: true };
   };
@@ -367,17 +417,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const target = appointments.find(a => a.id === appointmentId);
     if (!target) return { success: false, error: 'Agendamento não encontrado.' };
 
-    if (!isValidAppointmentTransition(target.status, 'completed')) {
-      return { success: false, error: 'Transição inválida para concluído.' };
-    }
-
-    setAppointments(prev => prev.map(a => a.id === appointmentId ? {
-      ...a,
-      status: 'completed',
+    const updated = {
+      ...target,
+      status: 'completed' as AppointmentStatus,
       updatedAt: new Date().toISOString()
-    } : a));
+    };
 
-    // Also auto-generate payment pending record if not paid
+    setAppointments(prev => prev.map(a => a.id === appointmentId ? updated : a));
+    persistAppointment(updated);
+
     if (target.paymentStatus === 'pending') {
       const existingPay = payments.find(p => p.appointmentId === appointmentId);
       if (!existingPay) {
@@ -396,6 +444,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           createdAt: new Date().toISOString()
         };
         setPayments(prev => [newPay, ...prev]);
+        persistPayment(newPay);
       }
     }
 
@@ -406,11 +455,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const target = appointments.find(a => a.id === appointmentId);
     if (!target) return { success: false, error: 'Agendamento não encontrado.' };
 
-    setAppointments(prev => prev.map(a => a.id === appointmentId ? {
-      ...a,
-      status: 'no_show',
+    const updated = {
+      ...target,
+      status: 'no_show' as AppointmentStatus,
       updatedAt: new Date().toISOString()
-    } : a));
+    };
+
+    setAppointments(prev => prev.map(a => a.id === appointmentId ? updated : a));
+    persistAppointment(updated);
 
     return { success: true };
   };
@@ -423,18 +475,29 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       createdAt: new Date().toISOString()
     };
     setPatients(prev => [newPatient, ...prev]);
+    persistPatient(newPatient);
     return newPatient;
   };
 
   const updatePatient = (id: string, updates: Partial<Patient>) => {
-    setPatients(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
+    setPatients(prev => prev.map(p => {
+      if (p.id === id) {
+        const updated = { ...p, ...updates };
+        persistPatient(updated);
+        return updated;
+      }
+      return p;
+    }));
   };
 
   // Clinical Records (STRICT ACCESS CONTROL & AUDIT LOGGING)
   const addClinicalRecord = (recordData: Omit<ClinicalRecord, 'id' | 'createdAt' | 'updatedAt' | 'createdBy' | 'isConfidential'>) => {
-    // Check permission: Only treating psychologist or superadmin
+    if (!currentUser) {
+      return { success: false, error: 'Usuário não autenticado.' };
+    }
+
     if (!canAccessClinicalRecord({ uid: currentUser.uid, role: currentUser.role }, { psychologistId: recordData.psychologistId })) {
-      return { success: false, error: 'Acesso negado: apenas o psicólogo responsável possui autorização para criar ou registrar anotações clínicas.' };
+      return { success: false, error: 'Acesso negado: apenas o psicólogo responsável possui autorização para criar anotações clínicas.' };
     }
 
     const newRecord: ClinicalRecord = {
@@ -447,6 +510,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     setClinicalRecords(prev => [newRecord, ...prev]);
+    persistClinicalRecord(newRecord);
 
     // Record immutable audit log
     const log: AuditLog = {
@@ -460,17 +524,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       details: `Registro de evolução clínica da sessão #${recordData.sessionNumber} do paciente ${recordData.patientId}`
     };
     setAuditLogs(prev => [log, ...prev]);
+    persistAuditLog(log);
 
     return { success: true, record: newRecord };
   };
 
   const getPatientClinicalRecords = (patientId: string): ClinicalRecord[] => {
-    // If not superadmin or the treating psychologist, return EMPTY (security enforcement)
-    if (currentUser.role === 'clinic_manager' || currentUser.role === 'patient') {
+    if (!currentUser || currentUser.role === 'clinic_manager' || currentUser.role === 'patient') {
       return [];
     }
 
-    // Record audit log for viewing records
     const records = clinicalRecords.filter(r => r.patientId === patientId);
     if (records.length > 0) {
       const log: AuditLog = {
@@ -484,6 +547,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         details: `Consulta ao prontuário e evoluções clínicas do paciente ID ${patientId}.`
       };
       setAuditLogs(prev => [log, ...prev]);
+      persistAuditLog(log);
     }
 
     return records;
@@ -497,18 +561,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       createdAt: new Date().toISOString()
     };
     setPayments(prev => [newPay, ...prev]);
+    persistPayment(newPay);
     return newPay;
   };
 
   const updatePaymentStatus = (id: string, status: 'paid' | 'pending' | 'overdue', method?: 'pix' | 'cash' | 'card' | 'transfer') => {
     setPayments(prev => prev.map(p => {
       if (p.id === id) {
-        return {
+        const updated = {
           ...p,
           status,
           method: method || p.method,
           paidAt: status === 'paid' ? new Date().toISOString() : p.paidAt
         };
+        persistPayment(updated);
+        return updated;
       }
       return p;
     }));
@@ -520,6 +587,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       id: `exp_${Date.now()}`
     };
     setExpenses(prev => [newExpense, ...prev]);
+    persistExpense(newExpense);
     return newExpense;
   };
 
@@ -530,11 +598,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       id: `room_${Date.now()}`
     };
     setRooms(prev => [...prev, newRoom]);
+    persistRoom(newRoom);
     return newRoom;
   };
 
   const updateRoom = (id: string, updates: Partial<ClinicRoom>) => {
-    setRooms(prev => prev.map(r => r.id === id ? { ...r, ...updates } : r));
+    setRooms(prev => prev.map(r => {
+      if (r.id === id) {
+        const updated = { ...r, ...updates };
+        persistRoom(updated);
+        return updated;
+      }
+      return r;
+    }));
   };
 
   return (
@@ -554,6 +630,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         notifications,
         auditLogs,
         availability: SEED_AVAILABILITY,
+        isAuthenticated: !!currentUser,
+        loginUser,
+        logout,
         switchUserRole,
         requestAppointment,
         confirmAppointment,

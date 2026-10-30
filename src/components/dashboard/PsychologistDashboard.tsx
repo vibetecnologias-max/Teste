@@ -38,6 +38,8 @@ export const PsychologistDashboard: React.FC<PsychologistDashboardProps> = ({ on
   const [selectedAppointmentForRejection, setSelectedAppointmentForRejection] = useState<string | null>(null);
   const [rejectionReason, setRejectionReason] = useState('');
 
+  if (!currentUser) return null;
+
   // Metrics calculation
   const totalPatients = patients.length;
   const activePatients = patients.filter(p => p.status === 'active').length;
