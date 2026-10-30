@@ -1,0 +1,261 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role-based access control.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 255 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "role": { "type": "string", "enum": ["superadmin", "psychologist", "clinic_manager", "patient"] },
+        "phone": { "type": "string", "maxLength": 30 },
+        "clinicId": { "type": "string", "maxLength": 128 },
+        "professionalId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Professional": {
+      "title": "Professional",
+      "description": "Psychologist professional credentials and clinical settings.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 120 },
+        "crp": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 255 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "bio": { "type": "string", "maxLength": 1000 },
+        "sessionDurationMinutes": { "type": "number" },
+        "sessionPrice": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "inactive"] }
+      },
+      "required": ["id", "userId", "name", "crp"]
+    },
+    "Patient": {
+      "title": "Patient",
+      "description": "Patient administrative registration details.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "psychologistId": { "type": "string", "maxLength": 128 },
+        "clinicId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 120 },
+        "email": { "type": "string", "maxLength": 255 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "birthDate": { "type": "string", "maxLength": 20 },
+        "cpf": { "type": "string", "maxLength": 20 },
+        "emergencyContact": { "type": "string", "maxLength": 100 },
+        "status": { "type": "string", "enum": ["active", "archived"] }
+      },
+      "required": ["id", "psychologistId", "name"]
+    },
+    "Appointment": {
+      "title": "Appointment",
+      "description": "Psychology session booking and state machine.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "psychologistId": { "type": "string", "maxLength": 128 },
+        "patientId": { "type": "string", "maxLength": 128 },
+        "patientName": { "type": "string", "maxLength": 120 },
+        "clinicId": { "type": "string", "maxLength": 128 },
+        "roomId": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "maxLength": 10 },
+        "startTime": { "type": "string", "maxLength": 5 },
+        "endTime": { "type": "string", "maxLength": 5 },
+        "durationMinutes": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "confirmed", "rejected", "cancellation_requested", "cancelled", "completed", "no_show"] },
+        "price": { "type": "number" },
+        "paymentStatus": { "type": "string", "enum": ["pending", "paid"] },
+        "notes": { "type": "string", "maxLength": 1000 }
+      },
+      "required": ["id", "psychologistId", "patientId", "date", "startTime", "endTime", "status"]
+    },
+    "ClinicalRecord": {
+      "title": "ClinicalRecord",
+      "description": "Sensitive psychotherapy session evolution and private clinical notes.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "psychologistId": { "type": "string", "maxLength": 128 },
+        "patientId": { "type": "string", "maxLength": 128 },
+        "appointmentId": { "type": "string", "maxLength": 128 },
+        "sessionDate": { "type": "string", "maxLength": 10 },
+        "sessionNumber": { "type": "number" },
+        "evolutionNotes": { "type": "string", "maxLength": 10000 },
+        "privateNotes": { "type": "string", "maxLength": 10000 },
+        "diagnosticHypothesis": { "type": "string", "maxLength": 2000 }
+      },
+      "required": ["id", "psychologistId", "patientId", "sessionDate", "evolutionNotes"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Financial ledger for sessions.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "psychologistId": { "type": "string", "maxLength": 128 },
+        "clinicId": { "type": "string", "maxLength": 128 },
+        "patientId": { "type": "string", "maxLength": 128 },
+        "patientName": { "type": "string", "maxLength": 120 },
+        "appointmentId": { "type": "string", "maxLength": 128 },
+        "amount": { "type": "number" },
+        "method": { "type": "string", "enum": ["pix", "cash", "card", "transfer"] },
+        "status": { "type": "string", "enum": ["paid", "pending", "overdue"] },
+        "dueDate": { "type": "string", "maxLength": 10 },
+        "paidAt": { "type": "string", "maxLength": 30 },
+        "description": { "type": "string", "maxLength": 255 }
+      },
+      "required": ["id", "psychologistId", "amount", "method", "status"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Operational expenses for psychologists and clinics.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "psychologistId": { "type": "string", "maxLength": 128 },
+        "clinicId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 150 },
+        "category": { "type": "string", "maxLength": 50 },
+        "amount": { "type": "number" },
+        "date": { "type": "string", "maxLength": 10 },
+        "status": { "type": "string", "enum": ["paid", "pending"] }
+      },
+      "required": ["id", "title", "amount", "date", "status"]
+    },
+    "Clinic": {
+      "title": "Clinic",
+      "description": "Clinic tenant organization.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 150 },
+        "cnpj": { "type": "string", "maxLength": 25 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "email": { "type": "string", "maxLength": 255 },
+        "address": { "type": "string", "maxLength": 255 },
+        "status": { "type": "string", "enum": ["active", "suspended"] }
+      },
+      "required": ["id", "name", "ownerId"]
+    },
+    "ClinicRoom": {
+      "title": "ClinicRoom",
+      "description": "Physical consultation rooms inside a clinic.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "clinicId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 255 },
+        "color": { "type": "string", "maxLength": 20 },
+        "active": { "type": "boolean" }
+      },
+      "required": ["id", "clinicId", "name"]
+    },
+    "Subscription": {
+      "title": "Subscription",
+      "description": "SaaS subscription tier for individual psychologists or clinics.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "planId": { "type": "string", "enum": ["individual", "professional", "clinic"] },
+        "planName": { "type": "string", "maxLength": 100 },
+        "priceMonthly": { "type": "number" },
+        "status": { "type": "string", "enum": ["trialing", "active", "past_due", "cancelled"] },
+        "currentPeriodEnd": { "type": "string" }
+      },
+      "required": ["id", "targetId", "planId", "status"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "In-app notifications for appointment events and updates.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "recipientUserId": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "maxLength": 50 },
+        "title": { "type": "string", "maxLength": 150 },
+        "message": { "type": "string", "maxLength": 500 },
+        "link": { "type": "string", "maxLength": 255 },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "recipientUserId", "title", "message", "read"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable audit log tracking access to clinical records and critical operations.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "userEmail": { "type": "string", "maxLength": 255 },
+        "action": { "type": "string", "maxLength": 80 },
+        "targetCollection": { "type": "string", "maxLength": 80 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "details": { "type": "string", "maxLength": 1000 },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "userId", "action", "targetId", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles and system roles."
+    },
+    "/professionals/{professionalId}": {
+      "schema": "Professional",
+      "description": "Psychologist public and professional profiles."
+    },
+    "/patients/{patientId}": {
+      "schema": "Patient",
+      "description": "Administrative patient registry."
+    },
+    "/appointments/{appointmentId}": {
+      "schema": "Appointment",
+      "description": "Session bookings, statuses and schedules."
+    },
+    "/clinical_records/{recordId}": {
+      "schema": "ClinicalRecord",
+      "description": "Confidential patient session evolutions accessible only by the treating psychologist."
+    },
+    "/payments/{paymentId}": {
+      "schema": "Payment",
+      "description": "Session revenue and payment records."
+    },
+    "/expenses/{expenseId}": {
+      "schema": "Expense",
+      "description": "Clinic or professional operational expenses."
+    },
+    "/clinics/{clinicId}": {
+      "schema": "Clinic",
+      "description": "Clinic organizations."
+    },
+    "/clinic_rooms/{roomId}": {
+      "schema": "ClinicRoom",
+      "description": "Physical consultation rooms in clinics."
+    },
+    "/subscriptions/{subId}": {
+      "schema": "Subscription",
+      "description": "SaaS billing subscriptions."
+    },
+    "/notifications/{notifId}": {
+      "schema": "Notification",
+      "description": "User notifications."
+    },
+    "/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Security audit records for LGPD compliance."
+    }
+  }
+}
