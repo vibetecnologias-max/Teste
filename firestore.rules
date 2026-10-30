@@ -42,13 +42,14 @@ service cloud.firestore {
     }
 
     // PROFESSIONALS DIRECTORY
-    // Hardening: userId link is immutable, preventing altering records of other professionals.
+    // Hardening: userId link and profId are immutable, preventing altering records of other professionals.
     match /professionals/{profId} {
       allow get, list: if isSignedIn();
       allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
       allow update: if isSignedIn() &&
         resource.data.userId == request.auth.uid &&
-        request.resource.data.userId == resource.data.userId;
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.id == resource.data.id;
       allow delete: if isSuperAdmin();
     }
 
@@ -179,25 +180,27 @@ service cloud.firestore {
     }
 
     // SUBSCRIPTIONS & PLANS (Multi-tenant SaaS isolation)
-    // Hardening Etapa 2: A client cannot consult another client's subscription.
-    // No blanket listing. Only target user/clinic or superadmin.
+    // Hardening: A client cannot consult another client's subscription.
+    // Strict isolation to tenant owner (user or clinic owner) or superadmin.
     match /subscriptions/{subId} {
       allow get: if isSignedIn() && (
         resource.data.targetId == request.auth.uid ||
         resource.data.userId == request.auth.uid ||
+        (('clinicId' in resource.data) && exists(/databases/$(database)/documents/clinics/$(resource.data.clinicId)) && get(/databases/$(database)/documents/clinics/$(resource.data.clinicId)).data.ownerId == request.auth.uid) ||
         isSuperAdmin()
       );
       allow list: if isSignedIn() && (
         resource.data.targetId == request.auth.uid ||
         resource.data.userId == request.auth.uid ||
+        (('clinicId' in resource.data) && exists(/databases/$(database)/documents/clinics/$(resource.data.clinicId)) && get(/databases/$(database)/documents/clinics/$(resource.data.clinicId)).data.ownerId == request.auth.uid) ||
         isSuperAdmin()
       );
       allow create, update, delete: if isSuperAdmin();
     }
 
-    // NOTIFICATIONS (Hardening Etapa 2)
+    // NOTIFICATIONS (Hardening Consolidado)
     // - Recipient validated: recipientUserId == request.auth.uid for read/update/delete.
-    // - Anti-spoofing: senderId must match authenticated user or cannot forge another sender.
+    // - Mandatory senderId: must be non-empty string and match authenticated UID.
     // - recipientUserId is STRICTLY IMMUTABLE.
     // - Updates restricted to read status and updatedAt.
     match /notifications/{notifId} {
@@ -205,7 +208,9 @@ service cloud.firestore {
       allow create: if isSignedIn() &&
         request.resource.data.recipientUserId is string &&
         request.resource.data.recipientUserId.size() > 0 &&
-        (request.resource.data.senderId == request.auth.uid || !('senderId' in request.resource.data));
+        request.resource.data.senderId is string &&
+        request.resource.data.senderId.size() > 0 &&
+        request.resource.data.senderId == request.auth.uid;
       allow update: if isSignedIn() &&
         resource.data.recipientUserId == request.auth.uid &&
         request.resource.data.recipientUserId == resource.data.recipientUserId &&

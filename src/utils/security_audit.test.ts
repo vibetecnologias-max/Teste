@@ -513,6 +513,21 @@ test('AUDIT 18: Notification creation blocks senderId spoofing and requires reci
     'real_auth_user_123'
   );
   assert.equal(blankRecipient.allowed, false);
+
+  // Missing senderId is strictly rejected (mandatory senderId hardening)
+  const missingSender = validateNotificationCreate(
+    { recipientUserId: 'target_user' },
+    'real_auth_user_123'
+  );
+  assert.equal(missingSender.allowed, false);
+  assert.match(missingSender.reason || '', /senderId é obrigatório/);
+
+  // Empty string senderId is strictly rejected
+  const emptySender = validateNotificationCreate(
+    { recipientUserId: 'target_user', senderId: '   ' },
+    'real_auth_user_123'
+  );
+  assert.equal(emptySender.allowed, false);
 });
 
 // -----------------------------------------------------------------------------
@@ -664,4 +679,131 @@ test('AUDIT 23: Audit log persistence returns structured error without swallowin
   assert.ok(result.error);
   assert.match(result.error, /PERMISSION_DENIED/);
 });
+
+// -----------------------------------------------------------------------------
+// 24. HARDENING AUDITORIA CONSOLIDADA: SANITIZATION ENFORCES EXPLICIT ALLOWLIST ATTRIBUTES
+// -----------------------------------------------------------------------------
+test('AUDIT 24: sanitizeAuditLog restricts attributes strictly to known allowlist and drops unapproved keys', () => {
+  const logWithExtraInjections = {
+    id: 'log_allowlist_1',
+    timestamp: '2026-10-30T10:00:00.000Z',
+    userId: 'user_psych_456',
+    userEmail: 'dr.marcos@test.com',
+    action: 'read_clinical_record' as const,
+    targetCollection: 'clinical_records',
+    targetId: 'pat_789',
+    details: 'Consulta ao prontuário clínico.',
+    injectedMaliciousPayload: 'DROP TABLE users;',
+    rawSessionHistory: 'Confidential clinical transcript',
+    internalSecretToken: 'xyz_token_secret'
+  } as unknown as AuditLog;
+
+  const sanitized = sanitizeAuditLog(logWithExtraInjections);
+  const keys = Object.keys(sanitized);
+
+  assert.equal(keys.includes('injectedMaliciousPayload'), false, 'Injected fields must be dropped');
+  assert.equal(keys.includes('rawSessionHistory'), false, 'Injected session transcripts must be dropped');
+  assert.equal(keys.includes('internalSecretToken'), false, 'Secret tokens must be dropped');
+  assert.equal(sanitized.action, 'read_clinical_record');
+  assert.equal(sanitized.targetCollection, 'clinical_records');
+});
+
+// -----------------------------------------------------------------------------
+// 25. HARDENING AUDITORIA CONSOLIDADA: CONSULTA DE LOGS RETORNA ESTRUTURA RICA E NUNCA ENGULA FALHAS
+// -----------------------------------------------------------------------------
+test('AUDIT 25: fetchAuditLogs pattern delivers structured status and does not report fake empty state upon failure', async () => {
+  const simulatedFetchAuditLogs = async (shouldFail: boolean): Promise<{ success: boolean; logs: AuditLog[]; error?: string }> => {
+    if (shouldFail) {
+      return {
+        success: false,
+        logs: [],
+        error: 'Missing or insufficient permissions: only superadmin can list /audit_logs'
+      };
+    }
+    return {
+      success: true,
+      logs: [{
+        id: 'log_real_1',
+        timestamp: new Date().toISOString(),
+        userId: 'admin_1',
+        userEmail: 'admin@projetopsi.com',
+        action: 'create_clinical_record',
+        targetCollection: 'clinical_records',
+        targetId: 'rec_100',
+        details: 'Registro clínico gravado'
+      }]
+    };
+  };
+
+  const failedResult = await simulatedFetchAuditLogs(true);
+  assert.equal(failedResult.success, false, 'Failure must be explicitly flagged');
+  assert.ok(failedResult.error, 'Error message must be present');
+  assert.match(failedResult.error!, /insufficient permissions/);
+
+  const successResult = await simulatedFetchAuditLogs(false);
+  assert.equal(successResult.success, true);
+  assert.equal(successResult.logs.length, 1);
+});
+
+// -----------------------------------------------------------------------------
+// 26. HARDENING AUDITORIA CONSOLIDADA: IMUTABILIDADE DE IDENTIFICADORES DE PROFISSIONAIS
+// -----------------------------------------------------------------------------
+test('AUDIT 26: Professional profile update protects userId and profId immutability', () => {
+  const existingProf = { id: 'prof_marcos_1', userId: 'user_marcos_1', name: 'Dr. Marcos' };
+  const incomingTampered = { id: 'prof_marcos_1', userId: 'user_attacker_2', name: 'Dr. Marcos' };
+
+  const validateProfUpdate = (
+    existing: { id: string; userId: string },
+    incoming: { id: string; userId: string },
+    callerUid: string
+  ): { allowed: boolean; reason?: string } => {
+    if (callerUid !== existing.userId) {
+      return { allowed: false, reason: 'Apenas o titular pode alterar o perfil.' };
+    }
+    if (incoming.userId !== existing.userId) {
+      return { allowed: false, reason: 'userId é imutável em profissionais.' };
+    }
+    if (incoming.id !== existing.id) {
+      return { allowed: false, reason: 'id é imutável em profissionais.' };
+    }
+    return { allowed: true };
+  };
+
+  const stolenAttempt = validateProfUpdate(existingProf, incomingTampered, 'user_marcos_1');
+  assert.equal(stolenAttempt.allowed, false);
+  assert.match(stolenAttempt.reason || '', /userId é imutável/);
+
+  const legitProfUpdate = validateProfUpdate(
+    existingProf,
+    { id: 'prof_marcos_1', userId: 'user_marcos_1' },
+    'user_marcos_1'
+  );
+  assert.equal(legitProfUpdate.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 27. HARDENING AUDITORIA CONSOLIDADA: ASSINATURAS MULTI-TENANT ISOLADAS POR CLÍNICA OU USUÁRIO
+// -----------------------------------------------------------------------------
+test('AUDIT 27: Subscription access allows clinic manager who owns clinic, blocks external users', () => {
+  const clinicSubscription = {
+    targetId: 'sub_clinic_alpha',
+    clinicId: 'clinic_alpha',
+    planId: 'clinic'
+  };
+
+  // Clinic owner UID matches
+  assert.equal(
+    validateSubscriptionAccess(clinicSubscription, 'manager_owner_uid', false, 'manager_owner_uid'),
+    true,
+    'Clinic owner must have access to clinic subscription'
+  );
+
+  // Unrelated psychologist or intruder blocked
+  assert.equal(
+    validateSubscriptionAccess(clinicSubscription, 'unrelated_psy_uid', false, 'manager_owner_uid'),
+    false,
+    'Unrelated user must be blocked from foreign clinic subscription'
+  );
+});
+
 

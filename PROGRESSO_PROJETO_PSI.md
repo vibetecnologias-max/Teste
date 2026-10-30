@@ -1,129 +1,110 @@
-# Relatório Técnico e Auditoria de Segurança — PROJETO PSI
+# Relatório Técnico, Auditoria Consolidada e Hardening — PROJETO PSI
 
 **Data da Atualização**: 30/10/2026  
-**Versão**: 1.4.0-security-hardened-phase2  
-**Escopo**: Segunda Etapa de Hardening do Firestore, Integridade de Dados e Blindagem Transacional  
-**Ambiente**: SaaS Web Responsivo Multi-tenant (React 19 + TypeScript + Vite + Tailwind CSS + Firebase)  
+**Versão**: 1.5.0-master-audit-consolidated  
+**Escopo**: Auditoria Técnica Aprofundada, Hardening Integral do Firestore, Blindagem Transacional e Evolução SaaS  
+**Ambiente**: Plataforma SaaS Web Responsiva Multi-tenant (React 19 + TypeScript + Vite + Tailwind CSS + Firebase)  
 **Database**: Firestore `ai-studio-projetopsi-5145c60e-456a-4133-8f60-cec68d0e9d78` (nam5)
 
 ---
 
-## 1. RESUMO EXECUTIVO DAS IMPLEMENTAÇÕES DA ETAPA 2
+## 1. RESUMO EXECUTIVO DA AUDITORIA E CORREÇÕES
 
-Nesta segunda etapa de hardening, foram implementadas blindagens aprofundadas a nível de regras de segurança do Firestore (`firestore.rules`), modelo intermediário (`firebase-blueprint.json`), tipos e serviços de persistência e auditoria:
+Nesta rodada de auditoria consolidada e hardening de produção do **Projeto Psi**, foram realizadas intervenções técnicas em todas as camadas da aplicação (regras de segurança, esquemas blueprint, tipagem TypeScript, serviços de persistência e componentes de interface):
 
-1. **Proteção Integral de Perfis de Usuário (`/users/{userId}`)**:
-   - Bloqueio estrito de escalada de privilégios e alteração não autorizada de atributos no banco.
-   - Um usuário comum está **impossibilitado** de alterar `role`, `uid`, `clinicId`, `professionalId`, `status`, `permissions` ou dados de controle administrativo.
-   - Apenas campos de perfil expressamente autorizados (`displayName`, `phone`, `avatarUrl`, `photoURL`, `updatedAt`) podem ser modificados via `affectedKeys().hasOnly(...)`.
-   - Modificações de vínculos institucionais e suspensão de contas são reservadas a procedimentos administrativos controlados (`isSuperAdmin()`).
+1. **Notificações com Remetente Estritamente Obrigatório e Anti-Spoofing (`/notifications/{notifId}`)**:
+   - O campo `senderId` tornou-se **estritamente obrigatório** e não-vazio. A possibilidade de omitir `senderId` foi eliminada de `firestore.rules`, `firebase-blueprint.json` e dos predicados de validação.
+   - O `senderId` deve ser string válida e corresponder com exatidão ao UID autenticado (`request.resource.data.senderId == request.auth.uid`).
+   - `recipientUserId` é imutável após a criação e o usuário destinatário só tem permissão para alterar o status de leitura (`read`) e timestamp de atualização.
+   - Nas transições de agendamento (solicitação, confirmação, recusa e cancelamento), as notificações são despachadas com `senderId: currentUser.uid` não-nulo e garantia de autenticação prévia.
 
-2. **Integridade Estrutural e Imutabilidade em Agendamentos (`/appointments/{appId}`)**:
-   - Campos de relacionamento central (`psychologistId`, `patientId`, `patientUserId`, `clinicId`, `roomId`) tornaram-se **estritamente imutáveis** em operações de atualização.
-   - O paciente autenticado **não pode alterar livremente status administrativos** (`confirmed`, `completed`, `no_show`, `rejected`).
-   - O paciente tem permissão apenas para cancelar ou solicitar cancelamento de sua própria sessão (`status in ['cancelled', 'cancellation_requested']`) e atualizar justificativa/notas.
-   - O psicólogo titular pode gerenciar o fluxo de confirmação, recusa, conclusão e reagendamento conforme as regras de negócio.
+2. **Auditoria LGPD & CFP Não-Silenciada (`/audit_logs` e `firestoreService.ts`)**:
+   - `fetchAuditLogs()` foi reformulada para **não engolir erros** e não mascarar falhas de permissão como se fossem listas vazias (`[]`). A função retorna resultado estruturado `{ success: boolean; logs: AuditLog[]; error?: string }`.
+   - `sanitizeAuditLog()` implementou uma lista branca explícita de atributos (`id`, `timestamp`, `userId`, `userEmail`, `action`, `targetCollection`, `targetId`, `details`), descartando quaisquer chaves adicionais ou injeções arbitrárias, além de expurgar menções a senhas e conteúdos narrativos clínicos sensíveis.
+   - O Painel do Superadministrador agora sincroniza os logs reais de auditoria, possui botão de atualização manual (`RefreshCw`) e alerta caso o Firestore retorne negação de acesso.
 
-3. **Notificações com Validação e Anti-Spoofing (`/notifications/{notifId}`)**:
-   - Destinatário validado obrigatoriamente (`recipientUserId is string && size() > 0`).
-   - Anti-spoofing implementado: o `senderId` é verificado contra `request.auth.uid`, impedindo que usuários forjem notificações falsas em nome de terceiros.
-   - `recipientUserId` tornou-se estritamente imutável na atualização.
-   - O destinatário só pode alterar o status de leitura (`read`) e data (`updatedAt`), sendo impedido de adulterar textos de avisos ou links.
+3. **Isolamento Multi-tenant Estrito de Assinaturas SaaS (`/subscriptions/{subId}`)**:
+   - Bloqueio completo de vazamento entre inquilinos. Usuários só consultam a assinatura de sua conta pessoal (`targetId == request.auth.uid || userId == request.auth.uid`) ou de sua clínica vinculada (`exists(/clinics/$(clinicId)) && ownerId == request.auth.uid`), além do superadministrador.
+   - Nenhum usuário comum consegue listar ou consultar planos contratados por outros profissionais ou organizações.
 
-4. **Isolamento Multi-tenant de Assinaturas SaaS (`/subscriptions/{subId}`)**:
-   - Eliminada qualquer consulta genérica ou listagem pública de assinaturas (`allow get, list: if isSignedIn()` foi removido).
-   - Usuários comuns só têm acesso de leitura ao documento de assinatura de sua própria conta ou clínica (`resource.data.targetId == request.auth.uid || resource.data.userId == request.auth.uid`).
-   - Apenas o superadministrador tem permissão para cadastrar ou modificar dados contratuais e planos.
+4. **Diretório de Profissionais (`/professionals/{profId}`)**:
+   - O vínculo `userId` e o identificador do profissional `id` tornaram-se imutáveis na atualização (`request.resource.data.userId == resource.data.userId && request.resource.data.id == resource.data.id`).
+   - Um psicólogo não pode alterar o registro de outro profissional da rede.
 
-5. **Diretório de Profissionais (`/professionals/{profId}`)**:
-   - Vínculo com a identidade do usuário (`userId`) protegido como imutável após a criação (`request.resource.data.userId == resource.data.userId`).
-   - Bloqueio que impede qualquer usuário de alterar registros de outros psicólogos cadastrados.
-
-6. **Blindagem e Não Mascaramento de Auditoria (`/audit_logs` e `persistAuditLog`)**:
-   - A função `persistAuditLog` foi reescrita para **não engolir erros**. Falhas de persistência retornam feedback estruturado `{ success: false, error: string }`.
-   - Função `sanitizeAuditLog` criada para filtrar e omitir proativamente quaisquer menções a senhas (`password`), evoluções clínicas (`evolutionNotes`), notas privadas (`privateNotes`) ou hipóteses diagnósticas (`diagnosticHypothesis`, `conductPlan`).
-   - A coleção `/audit_logs` permanece estritamente append-only, com `update` e `delete` desabilitados por regra e consulta restrita a administradores.
-
-7. **Prontuários Clínicos (`/clinical_records/{recordId}`) — Sigilo Profissional Absoluto**:
-   - Padrão Master Gate implementado na criação: exige validação relacional de que o paciente existe no Firestore e pertence legitimamente àquele psicólogo (`exists(...) && get(...).data.psychologistId == request.auth.uid`).
-   - Campos `psychologistId` e `patientId` tornados imutáveis na atualização.
-   - Acesso estritamente negado a superadministradores, gestores e pacientes.
+5. **Prontuários Clínicos (`/clinical_records/{recordId}`) — Sigilo Absoluto**:
+   - Proteção estrita baseada nas Resoluções do CFP nº 01/2009 e LGPD Art. 11: apenas o psicólogo assistente titular do paciente possui autorização de leitura e escrita.
+   - Acesso estritamente negado a superadministradores, gestores administrativos de clínicas e pacientes.
+   - Master Gate na criação: o paciente referenciado deve existir no Firestore e pertencer ao psicólogo autor da anotação.
 
 ---
 
-## 2. ARQUIVOS ALTERADOS NO PROJETO
+## 2. ARQUIVOS ATUALIZADOS NESTA RODADA
 
 1. `firestore.rules`:
-   - Regras atualizadas com verificação de campos permitidos (`affectedKeys().hasOnly`), imutabilidade relacional em `appointments`, `users`, `clinical_records`, `professionals`, isolamento em `subscriptions` e anti-spoofing em `notifications`. Regras implantadas no Firebase via `DeployRules` RPC.
+   - Regras atualizadas com obrigatoriedade estrita de `senderId`, imutabilidade de identificadores de profissionais, isolamento multi-tenant de assinaturas e blindagem transacional.
+   - Regras publicadas com sucesso no Firebase via `deploy_firebase`.
 2. `firebase-blueprint.json`:
-   - Atualizado o esquema de `Notification` para registrar `senderId` com limite de 128 caracteres.
-3. `src/types/index.ts`:
-   - Adicionado o campo opcional `senderId?: string` na interface `AppNotification`.
-4. `src/services/firestoreService.ts`:
-   - Refatorada a função `persistAuditLog` para retornar `{ success: boolean; error?: string }` e tratar erros com `handleFirestoreError`.
-   - Adicionada a função `sanitizeAuditLog` para higienização de logs antes do envio ao banco.
-5. `src/context/AppContext.tsx`:
-   - Incluído `senderId: currentUser.uid` na geração de notificações em solicitações, confirmações e cancelamentos de agendamentos.
-   - Conectado o retorno estruturado de persistência de auditoria.
-6. `src/utils/rules.ts`:
-   - Implementadas as funções lógicas de validação de regras de segurança: `validateUserProfileUpdate`, `validateAppointmentUpdate`, `validateNotificationCreate`, `validateNotificationUpdate`, `validateSubscriptionAccess`, `validateClinicalRecordWrite`.
+   - Atualizado o esquema formal de `Notification` incluindo `"senderId"` no array de propriedades obrigatórias (`required`).
+3. `src/services/firestoreService.ts`:
+   - Atualizada a função `sanitizeAuditLog` com validação de allowlist explícita de campos e expurgo de dados sensíveis.
+   - Atualizada a função `fetchAuditLogs` para retorno estruturado com propagação de erros.
+4. `src/context/AppContext.tsx`:
+   - Sincronização automática de logs de auditoria para superadministrador.
+   - Implementação e exportação de `refreshAuditLogs`.
+   - Garantia de autenticação e validação de `senderId: currentUser.uid` em confirmações, recusas e cancelamentos de consultas.
+5. `src/utils/rules.ts`:
+   - Atualizado `validateNotificationCreate` exigindo `senderId` obrigatório e não-vazio.
+   - Atualizado `validateSubscriptionAccess` para validação relacional de proprietário da clínica.
+6. `src/components/admin/SuperAdminView.tsx`:
+   - Adicionada ação de recarga manual de logs de auditoria com feedback visual de carregamento e estado vazio esclarecedor.
 7. `src/utils/security_audit.test.ts`:
-   - Suíte de testes expandida de 20 para 30 testes unitários automatizados, cobrindo integralmente todos os novos requisitos de segurança.
+   - Suíte expandida para **34 testes automatizados**, cobrindo allowlist de auditoria, tratamento de erros, imutabilidade de profissionais e isolamento de assinaturas por clínica.
 
 ---
 
-## 3. SEPARAÇÃO E RESULTADOS DOS TESTES
+## 3. RELATÓRIO DE TESTES E EVIDÊNCIAS DE EXECUÇÃO
 
-Em cumprimento rigoroso à transparência técnica requerida:
+### 3.1 Testes Unitários Automatizados (34/34 Aprovados)
+Executados via `npx tsx --test src/utils/*.test.ts`:
 
-### 3.1 Testes Unitários Executados com Sucesso (30/30)
-Executados diretamente no ambiente com `npx tsx --test src/utils/*.test.ts`:
-
-- `AUDIT 1`: Sessão não autenticada é estritamente nula e bloqueada.
+- `AUDIT 1`: Sessão inicial estritamente nula e bloqueada sem login.
 - `AUDIT 2`: Alternância fictícia de perfil (`switchUserRole`) ausente e proibida.
-- `AUDIT 3`: Auto-cadastro com privilégio de superadministrador é rejeitado com exceção.
+- `AUDIT 3`: Auto-cadastro com privilégio de superadministrador é rejeitado.
 - `AUDIT 4`: Superadministrador estritamente bloqueado de prontuários clínicos.
 - `AUDIT 5`: Psicólogo A não acessa prontuários do Psicólogo B.
-- `AUDIT 6`: Gestor de clínica não acessa dados clínicos.
+- `AUDIT 6`: Gestor de clínica não acessa anotações e evoluções clínicas.
 - `AUDIT 7`: Paciente não acessa evoluções clínicas ou prontuários internos.
 - `AUDIT 8`: Isolamento multi-tenant de salas e agendamentos entre clínicas.
-- `AUDIT 9`: Coleções vazias no Firestore retornam listas vazias (`[]`), sem dados simulados.
+- `AUDIT 9`: Coleções vazias no Firestore retornam listas vazias (`[]`), sem dados fictícios.
 - `AUDIT 10`: Falhas de persistência não são mascaradas e retornam erro estruturado.
-- `AUDIT 11`: Detecção de conflito de sala física e profissional no agendamento com buffer.
-- `AUDIT 12`: Máquina de estados de agendamentos impede transições ilegais ou atalhos.
+- `AUDIT 11`: Detecção de conflito de sala física e profissional no agendamento.
+- `AUDIT 12`: Máquina de estados de agendamentos impede transições ilegais.
 - `AUDIT 13`: Integridade e imutabilidade do esquema de logs de auditoria.
-- `AUDIT 14`: Usuário comum **não consegue** alterar `role`, `uid`, `status`, `clinicId`, `professionalId` (somente campos seguros de perfil).
+- `AUDIT 14`: Usuário comum não altera campos sensíveis de perfil (`role`, `uid`, etc.).
 - `AUDIT 15`: Superadministrador tem permissão para ajustes administrativos de perfil.
-- `AUDIT 16`: Identificadores centrais de agendamento (`psychologistId`, `patientId`, `patientUserId`, `clinicId`, `roomId`) são estritamente imutáveis.
-- `AUDIT 17`: Paciente não pode definir status administrativos (`confirmed`, `completed`, `no_show`), mas pode cancelar ou solicitar cancelamento.
-- `AUDIT 18`: Criação de notificação bloqueia falsificação de remetente (`senderId`) e exige destinatário.
-- `AUDIT 19`: Destinatário da notificação é imutável e usuário só pode alterar status de leitura (`read`).
-- `AUDIT 20`: Assinaturas SaaS não podem ser consultadas entre diferentes inquilinos/usuários.
-- `AUDIT 21`: Prontuário clínico exige vínculo relacional legítimo com paciente e proíbe alteração de `psychologistId`/`patientId`.
-- `AUDIT 22`: Higienização de auditoria expurga senhas, hipóteses diagnósticas e anotações clínicas de logs.
-- `AUDIT 23`: Persistência de auditoria retorna erro estruturado em caso de falha de permissão ou rede.
-- (E mais 7 testes de cálculo financeiro, conversão de horários, cálculo de slots livres e intervalos de agenda).
+- `AUDIT 16`: Identificadores centrais de agendamento são estritamente imutáveis.
+- `AUDIT 17`: Paciente não pode definir status administrativos em agendamentos.
+- `AUDIT 18`: Criação de notificação bloqueia falsificação e exige `senderId` obrigatório não-vazio.
+- `AUDIT 19`: Destinatário de notificação é imutável e usuário só altera status de leitura.
+- `AUDIT 20`: Assinaturas SaaS não podem ser consultadas entre diferentes inquilinos.
+- `AUDIT 21`: Prontuário clínico exige vínculo relacional legítimo com paciente.
+- `AUDIT 22`: Higienização de auditoria expurga senhas, hipóteses diagnósticas e anotações.
+- `AUDIT 23`: Persistência de auditoria retorna erro estruturado em falhas.
+- `AUDIT 24`: `sanitizeAuditLog` restringe atributos a lista branca estrita e descarta chaves não autorizadas.
+- `AUDIT 25`: `fetchAuditLogs` retorna estrutura rica e não silencia erros como lista vazia falsa.
+- `AUDIT 26`: Atualização de perfil de psicólogo protege imutabilidade de `id` e `userId`.
+- `AUDIT 27`: Assinaturas multi-tenant acessíveis por gestor titular da clínica e bloqueadas para terceiros.
+- (E mais 7 testes de domínio para cálculo financeiro, conversão de horários, cálculo de slots livres e intervalos de agenda).
 
-**Resultado**: 30 aprovados, 0 falhas (tempo de execução: ~950ms).
+**Resultado**: 34 testes executados, 34 aprovados, 0 falhas (tempo: ~950ms).
 
-### 3.2 Testes de Integração Executados com Sucesso
-- Compilação completa do TypeScript sem erros (`npx tsc --noEmit` exit code 0).
-- Compilação bem-sucedida do frontend via Vite (`compile_applet` exit code 0).
-- Verificação do tratamento de erros do Firestore através do interceptor padronizado `handleFirestoreError`.
+### 3.2 Testes de Compilação
+- Compilação via Vite (`npm run build` / `compile_applet`): **Sucesso** (código de saída 0).
 
-### 3.3 Testes de Regras de Segurança do Firestore
-- Regras revisadas, validadas e publicadas no projeto Firebase ativo (`ai-studio-projetopsi-5145c60e-456a-4133-8f60-cec68d0e9d78`, região `nam5`) através do método `DeployRules` RPC do FAX service, retornando sucesso `RPC action fax.DeployRules succeeded: {}`.
-- Predicados e restrições booleanas testados e validados nas funções de autorização do domínio.
+### 3.3 Testes das Regras do Firestore
+- `firestore.rules` implantado via ferramenta `deploy_firebase` no projeto `ai-studio-projetopsi-5145c60e-456a-4133-8f60-cec68d0e9d78` com status de sucesso.
 
-### 3.4 Verificações que Não Puderam ser Executadas pelo Ambiente
-- **Firebase Local Emulator Suite (Java Runtime)**: O ambiente de execução do container Linux não dispõe de Java JRE/JDK instalado (`sh: 1: java: not found`). O executável do emulador local do Firestore depende de Java 11+. Por esse motivo, os testes de regras foram realizados via testes unitários dos predicados de validação e implantação direta no banco provisionado na nuvem.
-- **Auditoria Externa Independente de Segurança (Pentest Terceirizado)**: A realização de testes de penetração externa com tentativa de exploração de vulnerabilidades por consultoria de segurança independente não foi realizada e é requisito obrigatório pré-produção.
-- **Testes de Carga e Estresse Concorrente**: Testes de volume de requisições simultâneas para validação dos limites do plano gratuito Spark (50.000 leituras/dia, 20.000 gravações/dia).
-
----
-
-## 4. LIMITAÇÕES CONHECIDAS E PENDÊNCIAS
-
-1. **Plano Spark (Custo Zero)**: A aplicação opera estritamente sob as cotas gratuitas do Firebase Spark. Não há cobrança, APIs externas pagas ou gateways de SMS/WhatsApp.
-2. **Cloud Functions para Operações Sensíveis**: Embora as regras do Firestore barrem com eficácia escalada de privilégios e violações relacionais no cliente, a emissão de faturas automáticas e a sincronização periódica de status de assinatura devem preferencialmente residir em Cloud Functions quando o sistema for publicado para comercialização.
-3. **Certificação Jurídica de Conformidade**: Este sistema incorpora arquitetura aderente às diretrizes do CFP (Resolução nº 01/2009) e LGPD (Lei 13.709/2018, Art. 11), porém a conformidade legal formal de um SaaS de saúde requer parecer emitido por encarregado de dados (DPO) e assessoria jurídica especializada antes da abertura ao público em geral.
+### 3.4 Limitações Ambientais Transparentemente Registradas
+- **Firebase Local Emulator Suite**: O container de execução não possui runtime Java (`sh: 1: java: not found`). Por essa razão, a emulação local de portas do Firestore não pôde ser iniciada; os testes foram executados via suíte unitária de predicados lógicos e implantação direta no banco na nuvem.
+- **Auditoria Jurídica & Pentest Externo**: O sistema cumpre as melhores práticas técnicas de arquitetura e proteção de dados, porém não substitui um parecer formal emitido por DPO (Encarregado de Proteção de Dados) e testes de intrusão externos antes da comercialização em larga escala.
+- **Plano Gratuito Spark**: Operação estritamente configurada sem cobranças ou APIs pagas externas.

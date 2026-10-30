@@ -310,8 +310,11 @@ export function validateNotificationCreate(
   if (!incoming.recipientUserId || incoming.recipientUserId.trim() === '') {
     return { allowed: false, reason: 'recipientUserId é obrigatório.' };
   }
-  if (incoming.senderId && incoming.senderId !== callerUid) {
-    return { allowed: false, reason: 'Anti-spoofing: senderId deve coincidir com o usuário autenticado.' };
+  if (!incoming.senderId || incoming.senderId.trim() === '') {
+    return { allowed: false, reason: 'senderId é obrigatório e não pode ser omitido conforme o padrão de integridade do Firestore.' };
+  }
+  if (incoming.senderId !== callerUid) {
+    return { allowed: false, reason: 'Anti-spoofing: senderId deve coincidir exatamente com o usuário autenticado.' };
   }
   return { allowed: true };
 }
@@ -341,13 +344,16 @@ export function validateNotificationUpdate(
  * Validates subscription isolation rules.
  */
 export function validateSubscriptionAccess(
-  sub: { targetId: string; userId?: string },
+  sub: { targetId: string; userId?: string; clinicId?: string },
   callerUid: string,
-  isSuperAdmin: boolean = false
+  isSuperAdmin: boolean = false,
+  clinicOwnerId?: string
 ): boolean {
   if (!callerUid) return false;
   if (isSuperAdmin) return true;
-  return sub.targetId === callerUid || sub.userId === callerUid;
+  if (sub.targetId === callerUid || sub.userId === callerUid) return true;
+  if (clinicOwnerId && clinicOwnerId === callerUid) return true;
+  return false;
 }
 
 /**

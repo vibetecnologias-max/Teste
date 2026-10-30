@@ -125,13 +125,40 @@ export async function persistClinicalRecord(record: ClinicalRecord): Promise<voi
   }
 }
 
-// AUDIT LOGS (IMMUTABLE & SANITIZED)
+// AUDIT LOGS (IMMUTABLE, ALLOWLIST-VALIDATED & SANITIZED)
+const ALLOWED_AUDIT_ACTIONS = new Set<AuditLog['action']>([
+  'read_clinical_record',
+  'create_clinical_record',
+  'update_clinical_record',
+  'cancel_appointment',
+  'role_change'
+]);
+
+const ALLOWED_TARGET_COLLECTIONS = new Set<string>([
+  'clinical_records',
+  'appointments',
+  'users',
+  'patients',
+  'subscriptions',
+  'notifications'
+]);
+
 /**
- * Sanitizes audit logs to ensure no passwords or clinical sensitive notes
- * (evolution notes, private notes, diagnostic hypotheses) are stored in the audit trail.
+ * Sanitizes audit logs using an explicit attribute allowlist and redacting
+ * any passwords, credentials or clinical sensitive data.
  */
 export function sanitizeAuditLog(log: AuditLog): AuditLog {
-  let sanitizedDetails = log.details || '';
+  // 1. Strict Attribute Allowlist: Only permit known, non-sensitive audit fields
+  const safeAction: AuditLog['action'] = ALLOWED_AUDIT_ACTIONS.has(log.action)
+    ? log.action
+    : 'role_change';
+
+  const safeCollection = ALLOWED_TARGET_COLLECTIONS.has(log.targetCollection)
+    ? log.targetCollection
+    : 'general';
+
+  // 2. Sensitive content purge: passwords, clinical evolution notes, diagnostic hypotheses
+  let sanitizedDetails = typeof log.details === 'string' ? log.details : '';
   const sensitivePatterns = [
     /password[=:\s]+[^\s,]+/gi,
     /evolutionNotes/gi,
@@ -144,8 +171,17 @@ export function sanitizeAuditLog(log: AuditLog): AuditLog {
     sanitizedDetails = sanitizedDetails.replace(pattern, '[DADO_SENSIVEL_OMITIDO]');
   }
 
+  // 3. Return explicit allowlist object
   return {
-    ...log,
+    id: String(log.id).slice(0, 128),
+    timestamp: typeof log.timestamp === 'string' && !isNaN(Date.parse(log.timestamp))
+      ? log.timestamp
+      : new Date().toISOString(),
+    userId: String(log.userId).slice(0, 128),
+    userEmail: String(log.userEmail).slice(0, 128),
+    action: safeAction,
+    targetCollection: safeCollection,
+    targetId: String(log.targetId).slice(0, 128),
     details: sanitizedDetails.slice(0, 1000)
   };
 }
@@ -163,14 +199,26 @@ export async function persistAuditLog(log: AuditLog): Promise<{ success: boolean
   }
 }
 
-export async function fetchAuditLogs(): Promise<AuditLog[]> {
+/**
+ * Fetches audit logs without swallowing errors or masking permission failures.
+ * Returns structured result with success indicator, logs, and explicit error message.
+ */
+export async function fetchAuditLogs(): Promise<{ success: boolean; logs: AuditLog[]; error?: string }> {
   try {
     const snap = await getDocs(collection(db, 'audit_logs'));
-    if (snap.empty) return [];
-    return snap.docs.map(d => ({ ...d.data(), id: d.id } as AuditLog));
+    if (snap.empty) {
+      return { success: true, logs: [] };
+    }
+    const logs = snap.docs.map(d => ({ ...d.data(), id: d.id } as AuditLog));
+    return { success: true, logs };
   } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Falha na comunicação com o Firestore ao consultar logs de auditoria.';
     handleFirestoreError(error, OperationType.LIST, 'audit_logs');
-    return [];
+    return {
+      success: false,
+      logs: [],
+      error: errorMsg
+    };
   }
 }
 

@@ -190,7 +190,7 @@
         "read": { "type": "boolean" },
         "createdAt": { "type": "string" }
       },
-      "required": ["id", "recipientUserId", "title", "message", "read"]
+      "required": ["id", "recipientUserId", "senderId", "title", "message", "read"]
     },
     "AuditLog": {
       "title": "AuditLog",

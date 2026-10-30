@@ -43,7 +43,8 @@ import {
   persistRoom,
   fetchNotificationsForUser,
   persistNotification,
-  updateNotificationInDb
+  updateNotificationInDb,
+  fetchAuditLogs
 } from '../services/firestoreService';
 import { logoutUser, getOrCreateUserProfile } from '../services/authService';
 
@@ -68,6 +69,7 @@ interface AppContextType {
   loginUser: (user: UserProfile) => void;
   logout: () => Promise<void>;
   clearPersistenceError: () => void;
+  refreshAuditLogs: () => Promise<void>;
   // Appointment actions
   requestAppointment: (data: {
     psychologistId: string;
@@ -189,6 +191,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             setExpenses(userExps);
           }
         }
+
+        if (currentUser.role === 'superadmin') {
+          const auditRes = await fetchAuditLogs();
+          if (isMounted) {
+            if (auditRes.success) {
+              setAuditLogs(auditRes.logs);
+            } else {
+              setPersistenceError(`Aviso de Auditoria: ${auditRes.error || 'Não foi possível sincronizar os registros de auditoria.'}`);
+            }
+          }
+        }
       } catch (err: any) {
         console.error('Erro ao sincronizar dados com o Firestore:', err);
         if (isMounted) {
@@ -202,6 +215,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       isMounted = false;
     };
   }, [currentUser?.uid, currentUser?.role, currentUser?.clinicId]);
+
+  const refreshAuditLogs = async (): Promise<void> => {
+    if (!currentUser || currentUser.role !== 'superadmin') return;
+    try {
+      const auditRes = await fetchAuditLogs();
+      if (auditRes.success) {
+        setAuditLogs(auditRes.logs);
+      } else {
+        setPersistenceError(`Aviso de Auditoria: ${auditRes.error || 'Falha ao recarregar trilha de auditoria.'}`);
+      }
+    } catch (err: any) {
+      setPersistenceError('Erro de conexão ao carregar registros de auditoria.');
+    }
+  };
 
   const loginUser = (user: UserProfile) => {
     setCurrentUser(user);
@@ -329,6 +356,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const confirmAppointment = async (appointmentId: string): Promise<{ success: boolean; error?: string }> => {
+    if (!currentUser) return { success: false, error: 'Usuário não autenticado.' };
+
     const target = appointments.find(a => a.id === appointmentId);
     if (!target) return { success: false, error: 'Agendamento não encontrado.' };
 
@@ -363,7 +392,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const notif: AppNotification = {
           id: `notif_${Date.now()}`,
           recipientUserId: target.patientUserId,
-          senderId: currentUser?.uid,
+          senderId: currentUser.uid,
           type: 'appointment_confirmed',
           title: 'Consulta Confirmada!',
           message: `Seu agendamento para ${target.date.split('-').reverse().join('/')} às ${target.startTime} foi confirmado pelo psicólogo.`,
@@ -383,6 +412,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const rejectAppointment = async (appointmentId: string, reason?: string): Promise<{ success: boolean; error?: string }> => {
+    if (!currentUser) return { success: false, error: 'Usuário não autenticado.' };
+
     const target = appointments.find(a => a.id === appointmentId);
     if (!target) return { success: false, error: 'Agendamento não encontrado.' };
 
@@ -405,7 +436,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const notif: AppNotification = {
           id: `notif_${Date.now()}`,
           recipientUserId: target.patientUserId,
-          senderId: currentUser?.uid,
+          senderId: currentUser.uid,
           type: 'appointment_rejected',
           title: 'Solicitação de agendamento não aceita',
           message: `Infelizmente seu pedido para ${target.date.split('-').reverse().join('/')} às ${target.startTime} não pôde ser aceito. Motivo: ${reason || 'Indisponibilidade de agenda.'}`,
@@ -425,6 +456,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const cancelAppointment = async (appointmentId: string, reason?: string): Promise<{ success: boolean; error?: string }> => {
+    if (!currentUser) return { success: false, error: 'Usuário não autenticado.' };
+
     const target = appointments.find(a => a.id === appointmentId);
     if (!target) return { success: false, error: 'Agendamento não encontrado.' };
 
@@ -442,6 +475,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     try {
       await persistAppointment(updated);
       setAppointments(prev => prev.map(a => a.id === appointmentId ? updated : a));
+
+      const recipientId = currentUser.uid === target.psychologistId
+        ? target.patientUserId
+        : target.psychologistId;
+
+      if (recipientId) {
+        const notif: AppNotification = {
+          id: `notif_${Date.now()}`,
+          recipientUserId: recipientId,
+          senderId: currentUser.uid,
+          type: 'cancellation_confirmed',
+          title: 'Agendamento Cancelado',
+          message: `O agendamento de ${target.date.split('-').reverse().join('/')} às ${target.startTime} foi cancelado. Motivo: ${reason || 'Cancelado pelo usuário.'}`,
+          link: currentUser.role === 'patient' ? '/meus-agendamentos' : '/agenda',
+          read: false,
+          createdAt: new Date().toISOString()
+        };
+        setNotifications(prev => [notif, ...prev]);
+        persistNotification(notif).catch(console.error);
+      }
+
       return { success: true };
     } catch (err: any) {
       console.error('Falha ao cancelar agendamento no Firestore:', err);
@@ -734,6 +788,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         loginUser,
         logout,
         clearPersistenceError,
+        refreshAuditLogs,
         requestAppointment,
         confirmAppointment,
         rejectAppointment,
