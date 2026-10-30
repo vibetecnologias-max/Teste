@@ -76,7 +76,7 @@ export const PatientPortalView: React.FC<PatientPortalViewProps> = ({ initialTab
     bookedRanges
   );
 
-  const handleSendBookingRequest = (e: React.FormEvent) => {
+  const handleSendBookingRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     setBookingError(null);
 
@@ -85,11 +85,11 @@ export const PatientPortalView: React.FC<PatientPortalViewProps> = ({ initialTab
       return;
     }
 
-    const res = requestAppointment({
+    const res = await requestAppointment({
       psychologistId: selectedProfessional.userId,
       patientId: currentUser.uid,
       patientName: currentUser.displayName,
-      patientPhone: currentUser.phone || '(11) 99123-8877',
+      patientPhone: currentUser.phone || '',
       date: selectedDate,
       startTime: selectedSlot.startTime,
       endTime: selectedSlot.endTime,
@@ -102,6 +102,7 @@ export const PatientPortalView: React.FC<PatientPortalViewProps> = ({ initialTab
       setBookingError(res.error || 'Erro ao enviar solicitação.');
       return;
     }
+
 
     setBookingSuccess(true);
     setSelectedSlot(null);

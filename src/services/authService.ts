@@ -10,7 +10,6 @@ import {
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../firebase/config';
 import { UserProfile, UserRole } from '../types';
-import { SEED_USERS, SEED_PROFESSIONALS } from '../data/seedData';
 
 /**
  * Signs in with email and password.
@@ -22,6 +21,7 @@ export async function loginWithEmail(email: string, pass: string): Promise<UserP
 
 /**
  * Registers a new user and creates their profile in Firestore.
+ * Strictly enforces that 'superadmin' cannot be chosen by self-registration.
  */
 export async function registerWithEmail(
   email: string,
@@ -33,6 +33,11 @@ export async function registerWithEmail(
   // Security guard: never allow self-registration as superadmin
   if (role === 'superadmin') {
     throw new Error('Operação negada: não é permitido auto-cadastro com perfil de superadministrador.');
+  }
+
+  // Validate allowed roles for self-registration
+  if (!['psychologist', 'clinic_manager', 'patient'].includes(role)) {
+    throw new Error('Perfil de usuário inválido.');
   }
 
   const userCredential = await createUserWithEmailAndPassword(auth, email, pass);
@@ -67,10 +72,21 @@ export async function registerWithEmail(
         specialities: ['Psicologia Clínica', 'Terapia Individual'],
         sessionDurationMinutes: 50,
         sessionPrice: 180,
-        clinicIds: ['clinic_mente_viva'],
         status: 'active'
       });
       await setDoc(doc(db, 'users', uid), { professionalId: profId }, { merge: true });
+    } else if (role === 'clinic_manager' && extra?.clinicName) {
+      const clinicId = `clinic_${uid}`;
+      newProfile.clinicId = clinicId;
+      await setDoc(doc(db, 'clinics', clinicId), {
+        id: clinicId,
+        name: extra.clinicName,
+        ownerId: uid,
+        phone: extra.phone || '',
+        email,
+        status: 'active'
+      });
+      await setDoc(doc(db, 'users', uid), { clinicId }, { merge: true });
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `users/${uid}`);
@@ -103,24 +119,42 @@ export async function loginWithGoogle(): Promise<UserProfile> {
 }
 
 /**
- * Retrieves the user profile from Firestore or creates a default patient profile if first sign-in.
+ * Retrieves the user profile from Firestore or creates a safe default patient profile if first sign-in.
+ * NEVER assigns superadmin or psychologist roles based on email pattern or seed data.
  */
 export async function getOrCreateUserProfile(user: FirebaseUser): Promise<UserProfile> {
   const userRef = doc(db, 'users', user.uid);
   try {
     const snap = await getDoc(userRef);
     if (snap.exists()) {
-      return snap.data() as UserProfile;
+      const data = snap.data();
+      // Ensure required properties exist safely
+      const validRole: UserRole = ['psychologist', 'clinic_manager', 'patient', 'superadmin'].includes(data.role)
+        ? data.role
+        : 'patient';
+
+      return {
+        uid: user.uid,
+        email: data.email || user.email || '',
+        displayName: data.displayName || user.displayName || 'Usuário',
+        role: validRole,
+        phone: data.phone,
+        avatarUrl: data.avatarUrl || user.photoURL || undefined,
+        clinicId: data.clinicId,
+        professionalId: data.professionalId,
+        status: data.status || 'active',
+        createdAt: data.createdAt || new Date().toISOString(),
+        updatedAt: data.updatedAt || new Date().toISOString()
+      };
     }
 
-    // Check if matching a pre-seeded account by email
-    const matchSeed = SEED_USERS.find(u => u.email.toLowerCase() === (user.email || '').toLowerCase());
+    // New user signing in: strictly assign default 'patient' role with standard privileges
     const profile: UserProfile = {
       uid: user.uid,
-      email: user.email || 'usuario@projetopsi.com.br',
-      displayName: user.displayName || matchSeed?.displayName || 'Usuário Projeto Psi',
-      role: matchSeed?.role || 'patient',
-      avatarUrl: user.photoURL || matchSeed?.avatarUrl,
+      email: user.email || '',
+      displayName: user.displayName || 'Novo Paciente',
+      role: 'patient',
+      avatarUrl: user.photoURL || undefined,
       status: 'active',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -133,3 +167,4 @@ export async function getOrCreateUserProfile(user: FirebaseUser): Promise<UserPr
     throw err;
   }
 }
+

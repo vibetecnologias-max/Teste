@@ -20,44 +20,13 @@ import {
   AuditLog,
   AppNotification
 } from '../types';
-import {
-  SEED_APPOINTMENTS,
-  SEED_PATIENTS,
-  SEED_CLINICAL_RECORDS,
-  SEED_PAYMENTS,
-  SEED_EXPENSES,
-  SEED_ROOMS,
-  SEED_AUDIT_LOGS,
-  SEED_NOTIFICATIONS,
-  SEED_CLINICS,
-  SEED_PROFESSIONALS
-} from '../data/seedData';
 
 /**
- * Bootstraps initial records into Firestore if collections are empty.
+ * Initializes Firestore structure if needed, without polluting with mock clinical data.
  */
 export async function bootstrapFirestoreData(): Promise<void> {
-  try {
-    const snap = await getDocs(collection(db, 'clinics'));
-    if (snap.empty) {
-      console.log('Populando dados iniciais no Firestore...');
-      // Seed clinics
-      for (const clinic of SEED_CLINICS) {
-        await setDoc(doc(db, 'clinics', clinic.id), clinic);
-      }
-      // Seed professionals
-      for (const prof of SEED_PROFESSIONALS) {
-        await setDoc(doc(db, 'professionals', prof.id), prof);
-      }
-      // Seed rooms
-      for (const room of SEED_ROOMS) {
-        await setDoc(doc(db, 'clinic_rooms', room.id), room);
-      }
-    }
-  } catch (error) {
-    // If offline or permission denied, handle gracefully
-    console.warn('Bootstrap de dados Firestore em modo local/tolerante:', error);
-  }
+  // Production-ready: does not inject mock patients or mock clinical records.
+  // Real data must be created by authenticated users in their respective workspaces.
 }
 
 // APPOINTMENTS
@@ -72,15 +41,15 @@ export async function fetchAppointmentsForUser(
     } else if (role === 'patient') {
       q = query(collection(db, 'appointments'), where('patientUserId', '==', userId));
     } else {
-      q = collection(db, 'appointments');
+      q = query(collection(db, 'appointments'), where('psychologistId', '==', userId));
     }
 
     const snap = await getDocs(q);
-    if (snap.empty) return SEED_APPOINTMENTS;
+    if (snap.empty) return [];
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as Appointment));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'appointments');
-    return SEED_APPOINTMENTS;
+    return [];
   }
 }
 
@@ -89,6 +58,7 @@ export async function persistAppointment(app: Appointment): Promise<void> {
     await setDoc(doc(db, 'appointments', app.id), app);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `appointments/${app.id}`);
+    throw error;
   }
 }
 
@@ -100,6 +70,7 @@ export async function updateAppointmentInDb(id: string, updates: Partial<Appoint
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `appointments/${id}`);
+    throw error;
   }
 }
 
@@ -108,11 +79,11 @@ export async function fetchPatientsForPsychologist(psychologistId: string): Prom
   try {
     const q = query(collection(db, 'patients'), where('psychologistId', '==', psychologistId));
     const snap = await getDocs(q);
-    if (snap.empty) return SEED_PATIENTS;
+    if (snap.empty) return [];
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as Patient));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'patients');
-    return SEED_PATIENTS;
+    return [];
   }
 }
 
@@ -121,10 +92,11 @@ export async function persistPatient(patient: Patient): Promise<void> {
     await setDoc(doc(db, 'patients', patient.id), patient);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `patients/${patient.id}`);
+    throw error;
   }
 }
 
-// CLINICAL RECORDS (STRICT SIGILO)
+// CLINICAL RECORDS (STRICT SIGILO PROFISSIONAL)
 export async function fetchClinicalRecordsForPatient(
   patientId: string,
   psychologistId: string
@@ -136,13 +108,11 @@ export async function fetchClinicalRecordsForPatient(
       where('psychologistId', '==', psychologistId)
     );
     const snap = await getDocs(q);
-    if (snap.empty) {
-      return SEED_CLINICAL_RECORDS.filter(r => r.patientId === patientId);
-    }
+    if (snap.empty) return [];
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as ClinicalRecord));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'clinical_records');
-    return SEED_CLINICAL_RECORDS.filter(r => r.patientId === patientId);
+    return [];
   }
 }
 
@@ -151,6 +121,7 @@ export async function persistClinicalRecord(record: ClinicalRecord): Promise<voi
     await setDoc(doc(db, 'clinical_records', record.id), record);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `clinical_records/${record.id}`);
+    throw error;
   }
 }
 
@@ -159,7 +130,18 @@ export async function persistAuditLog(log: AuditLog): Promise<void> {
   try {
     await setDoc(doc(db, 'audit_logs', log.id), log);
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `audit_logs/${log.id}`);
+    console.error('Falha ao gravar log de auditoria no Firestore:', error);
+  }
+}
+
+export async function fetchAuditLogs(): Promise<AuditLog[]> {
+  try {
+    const snap = await getDocs(collection(db, 'audit_logs'));
+    if (snap.empty) return [];
+    return snap.docs.map(d => ({ ...d.data(), id: d.id } as AuditLog));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'audit_logs');
+    return [];
   }
 }
 
@@ -168,11 +150,11 @@ export async function fetchPayments(psychologistId: string): Promise<PaymentReco
   try {
     const q = query(collection(db, 'payments'), where('psychologistId', '==', psychologistId));
     const snap = await getDocs(q);
-    if (snap.empty) return SEED_PAYMENTS;
+    if (snap.empty) return [];
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as PaymentRecord));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'payments');
-    return SEED_PAYMENTS;
+    return [];
   }
 }
 
@@ -181,6 +163,7 @@ export async function persistPayment(payment: PaymentRecord): Promise<void> {
     await setDoc(doc(db, 'payments', payment.id), payment);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `payments/${payment.id}`);
+    throw error;
   }
 }
 
@@ -189,11 +172,11 @@ export async function fetchExpenses(psychologistId: string): Promise<ExpenseReco
   try {
     const q = query(collection(db, 'expenses'), where('psychologistId', '==', psychologistId));
     const snap = await getDocs(q);
-    if (snap.empty) return SEED_EXPENSES;
+    if (snap.empty) return [];
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as ExpenseRecord));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'expenses');
-    return SEED_EXPENSES;
+    return [];
   }
 }
 
@@ -202,6 +185,7 @@ export async function persistExpense(expense: ExpenseRecord): Promise<void> {
     await setDoc(doc(db, 'expenses', expense.id), expense);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `expenses/${expense.id}`);
+    throw error;
   }
 }
 
@@ -215,11 +199,11 @@ export async function fetchRooms(clinicId?: string): Promise<ClinicRoom[]> {
       q = collection(db, 'clinic_rooms');
     }
     const snap = await getDocs(q);
-    if (snap.empty) return SEED_ROOMS;
+    if (snap.empty) return [];
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as ClinicRoom));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'clinic_rooms');
-    return SEED_ROOMS;
+    return [];
   }
 }
 
@@ -228,6 +212,7 @@ export async function persistRoom(room: ClinicRoom): Promise<void> {
     await setDoc(doc(db, 'clinic_rooms', room.id), room);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `clinic_rooms/${room.id}`);
+    throw error;
   }
 }
 
@@ -236,11 +221,11 @@ export async function fetchNotificationsForUser(userId: string): Promise<AppNoti
   try {
     const q = query(collection(db, 'notifications'), where('recipientUserId', '==', userId));
     const snap = await getDocs(q);
-    if (snap.empty) return SEED_NOTIFICATIONS.filter(n => n.recipientUserId === userId);
+    if (snap.empty) return [];
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as AppNotification));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'notifications');
-    return SEED_NOTIFICATIONS.filter(n => n.recipientUserId === userId);
+    return [];
   }
 }
 
@@ -249,6 +234,7 @@ export async function persistNotification(notification: AppNotification): Promis
     await setDoc(doc(db, 'notifications', notification.id), notification);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `notifications/${notification.id}`);
+    throw error;
   }
 }
 
@@ -257,6 +243,8 @@ export async function updateNotificationInDb(id: string, updates: Partial<AppNot
     await updateDoc(doc(db, 'notifications', id), updates);
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `notifications/${id}`);
+    throw error;
   }
 }
+
 

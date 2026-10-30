@@ -12,51 +12,50 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isValidId(id) {
-      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
-    }
-
     function isSuperAdmin() {
-      return isSignedIn() && (
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'superadmin')
-      );
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
     }
 
     // USERS COLLECTION
-    // Anti-privilege-escalation: users can never self-assign 'superadmin' role
+    // Anti-privilege-escalation: users can NEVER self-assign 'superadmin' role
     match /users/{userId} {
       allow get: if isSignedIn() && (request.auth.uid == userId || isSuperAdmin());
       allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isSuperAdmin());
       allow create: if isSignedIn() && request.auth.uid == userId &&
+        request.resource.data.uid == request.auth.uid &&
         request.resource.data.role != 'superadmin' &&
         (request.resource.data.role in ['psychologist', 'clinic_manager', 'patient']);
       allow update: if isSignedIn() && (
-        (request.auth.uid == userId && request.resource.data.role == resource.data.role) ||
+        (request.auth.uid == userId &&
+         request.resource.data.role == resource.data.role &&
+         request.resource.data.uid == resource.data.uid) ||
         isSuperAdmin()
       );
       allow delete: if isSuperAdmin();
     }
 
-    // PROFESSIONALS COLLECTION
+    // PROFESSIONALS DIRECTORY
     match /professionals/{profId} {
       allow get, list: if isSignedIn();
-      allow create: if isSignedIn() && (request.resource.data.userId == request.auth.uid || isSuperAdmin());
-      allow update: if isSignedIn() && (resource.data.userId == request.auth.uid || isSuperAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid &&
+        request.resource.data.userId == resource.data.userId;
       allow delete: if isSuperAdmin();
     }
 
-    // CLINICS & ROOMS
-    // Multi-tenant isolation: only clinic owner or superadmin can create/modify
+    // CLINICS & ROOMS (Multi-tenant isolation)
     match /clinics/{clinicId} {
-      allow get, list: if isSignedIn();
+      allow get, list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isSuperAdmin());
       allow create: if isSignedIn() && request.resource.data.ownerId == request.auth.uid;
       allow update, delete: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isSuperAdmin());
     }
 
     match /clinic_rooms/{roomId} {
-      allow get, list: if isSignedIn();
+      allow get, list: if isSignedIn() && (
+        isSuperAdmin() ||
+        (exists(/databases/$(database)/documents/clinics/$(resource.data.clinicId)) &&
+         get(/databases/$(database)/documents/clinics/$(resource.data.clinicId)).data.ownerId == request.auth.uid)
+      );
       allow create: if isSignedIn() && (
         isSuperAdmin() ||
         (exists(/databases/$(database)/documents/clinics/$(request.resource.data.clinicId)) &&
@@ -70,67 +69,51 @@ service cloud.firestore {
     }
 
     // PATIENTS (Administrative Data)
+    // Strictly limited to treating psychologist or the patient themselves
     match /patients/{patientId} {
-      allow get: if isSignedIn() && (
+      allow get, list: if isSignedIn() && (
         resource.data.psychologistId == request.auth.uid ||
-        resource.data.userId == request.auth.uid ||
-        isSuperAdmin()
-      );
-      allow list: if isSignedIn() && (
-        resource.data.psychologistId == request.auth.uid ||
-        resource.data.userId == request.auth.uid ||
-        isSuperAdmin()
+        resource.data.userId == request.auth.uid
       );
       allow create: if isSignedIn() && (
         request.resource.data.psychologistId == request.auth.uid ||
-        request.resource.data.userId == request.auth.uid ||
-        isSuperAdmin()
+        request.resource.data.userId == request.auth.uid
       );
       allow update: if isSignedIn() && (
         resource.data.psychologistId == request.auth.uid ||
-        resource.data.userId == request.auth.uid ||
-        isSuperAdmin()
+        resource.data.userId == request.auth.uid
       );
-      allow delete: if isSuperAdmin() || (isSignedIn() && resource.data.psychologistId == request.auth.uid);
+      allow delete: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
     }
 
     // APPOINTMENTS
+    // Strictly isolated to the participating psychologist and patient
     match /appointments/{appId} {
-      allow get: if isSignedIn() && (
+      allow get, list: if isSignedIn() && (
         resource.data.psychologistId == request.auth.uid ||
-        resource.data.patientId == request.auth.uid ||
         resource.data.patientUserId == request.auth.uid ||
-        isSuperAdmin()
-      );
-      allow list: if isSignedIn() && (
-        resource.data.psychologistId == request.auth.uid ||
-        resource.data.patientId == request.auth.uid ||
-        resource.data.patientUserId == request.auth.uid ||
-        isSuperAdmin()
+        resource.data.patientId == request.auth.uid
       );
       allow create: if isSignedIn() && (
         request.resource.data.patientUserId == request.auth.uid ||
-        request.resource.data.psychologistId == request.auth.uid ||
-        isSuperAdmin()
+        request.resource.data.psychologistId == request.auth.uid
       );
       allow update: if isSignedIn() && (
         resource.data.psychologistId == request.auth.uid ||
-        resource.data.patientId == request.auth.uid ||
         resource.data.patientUserId == request.auth.uid ||
-        isSuperAdmin()
+        resource.data.patientId == request.auth.uid
       );
       allow delete: if isSignedIn() && (
         resource.data.psychologistId == request.auth.uid ||
-        isSuperAdmin()
+        resource.data.patientUserId == request.auth.uid
       );
     }
 
-    // CLINICAL RECORDS (STRICT SIGILO PROFISSIONAL / CFP / LGPD)
-    // Only the authorized psychologist responsible for the care has access.
-    // SuperAdmin, Clinic Managers, Receptionists and Patients are STRICTLY DENIED access.
+    // CLINICAL RECORDS (STRICT SIGILO PROFISSIONAL / CFP nº 01/2009 / LGPD Artigo 11)
+    // STRICTEST RULE: Only the treating psychologist who owns the record can access it.
+    // SuperAdmin, Clinic Managers, Receptionists and Patients are STRICTLY DENIED read and write.
     match /clinical_records/{recordId} {
-      allow get: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
-      allow list: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
+      allow get, list: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
       allow create: if isSignedIn() && request.resource.data.psychologistId == request.auth.uid;
       allow update: if isSignedIn() && resource.data.psychologistId == request.auth.uid &&
         request.resource.data.psychologistId == resource.data.psychologistId;
@@ -139,46 +122,19 @@ service cloud.firestore {
 
     // FINANCIAL: PAYMENTS & EXPENSES
     match /payments/{paymentId} {
-      allow get: if isSignedIn() && (
+      allow get, list: if isSignedIn() && (
         resource.data.psychologistId == request.auth.uid ||
-        resource.data.patientId == request.auth.uid ||
-        resource.data.patientUserId == request.auth.uid ||
-        isSuperAdmin()
+        resource.data.patientUserId == request.auth.uid
       );
-      allow list: if isSignedIn() && (
-        resource.data.psychologistId == request.auth.uid ||
-        resource.data.patientId == request.auth.uid ||
-        resource.data.patientUserId == request.auth.uid ||
-        isSuperAdmin()
-      );
-      allow create: if isSignedIn() && (
-        request.resource.data.psychologistId == request.auth.uid ||
-        isSuperAdmin()
-      );
-      allow update: if isSignedIn() && (
-        resource.data.psychologistId == request.auth.uid ||
-        isSuperAdmin()
-      );
+      allow create: if isSignedIn() && request.resource.data.psychologistId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
       allow delete: if isSuperAdmin();
     }
 
     match /expenses/{expenseId} {
-      allow get: if isSignedIn() && (
-        resource.data.psychologistId == request.auth.uid ||
-        isSuperAdmin()
-      );
-      allow list: if isSignedIn() && (
-        resource.data.psychologistId == request.auth.uid ||
-        isSuperAdmin()
-      );
-      allow create: if isSignedIn() && (
-        request.resource.data.psychologistId == request.auth.uid ||
-        isSuperAdmin()
-      );
-      allow update, delete: if isSignedIn() && (
-        resource.data.psychologistId == request.auth.uid ||
-        isSuperAdmin()
-      );
+      allow get, list: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.psychologistId == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
     }
 
     // SUBSCRIPTIONS & PLANS
@@ -189,18 +145,17 @@ service cloud.firestore {
 
     // NOTIFICATIONS: strictly isolated to recipient user
     match /notifications/{notifId} {
-      allow get: if isSignedIn() && resource.data.recipientUserId == request.auth.uid;
-      allow list: if isSignedIn() && resource.data.recipientUserId == request.auth.uid;
+      allow get, list: if isSignedIn() && resource.data.recipientUserId == request.auth.uid;
       allow create: if isSignedIn();
       allow update: if isSignedIn() && resource.data.recipientUserId == request.auth.uid;
       allow delete: if isSignedIn() && resource.data.recipientUserId == request.auth.uid;
     }
 
     // AUDIT LOGS (Immutable security audit trail)
+    // Append-only for users, read-only for superadministrators, never updatable or deletable
     match /audit_logs/{logId} {
-      allow get: if isSuperAdmin();
-      allow list: if isSuperAdmin();
-      allow create: if isSignedIn();
+      allow get, list: if isSuperAdmin();
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
       allow update: if false; // Immutable
       allow delete: if false; // Immutable
     }

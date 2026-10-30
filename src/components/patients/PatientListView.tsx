@@ -40,6 +40,9 @@ export const PatientListView: React.FC<PatientListViewProps> = ({ onOpenClinical
   const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
   const [notes, setNotes] = useState('');
 
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
   if (!currentUser) return null;
 
   const filteredPatients = patients.filter(p => {
@@ -51,11 +54,14 @@ export const PatientListView: React.FC<PatientListViewProps> = ({ onOpenClinical
     return true;
   });
 
-  const handleCreatePatient = (e: React.FormEvent) => {
+  const handleCreatePatient = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
 
-    addPatient({
+    setIsSubmitting(true);
+    setFormError(null);
+
+    const res = await addPatient({
       psychologistId: currentUser.uid,
       name,
       email,
@@ -68,15 +74,22 @@ export const PatientListView: React.FC<PatientListViewProps> = ({ onOpenClinical
       notes
     });
 
-    setShowNewModal(false);
-    // Reset form
-    setName('');
-    setEmail('');
-    setPhone('');
-    setCpf('');
-    setEmergencyContact('');
-    setNotes('');
+    setIsSubmitting(false);
+
+    if (res.success) {
+      setShowNewModal(false);
+      // Reset form
+      setName('');
+      setEmail('');
+      setPhone('');
+      setCpf('');
+      setEmergencyContact('');
+      setNotes('');
+    } else {
+      setFormError(res.error || 'Erro ao persistir paciente no Firestore.');
+    }
   };
+
 
   const patientAppointments = selectedPatient
     ? appointments.filter(a => a.patientId === selectedPatient.id)

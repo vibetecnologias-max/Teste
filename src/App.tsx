@@ -19,7 +19,7 @@ import { AvailabilitySettings } from './components/availability/AvailabilitySett
 import { AuthScreen } from './components/auth/AuthScreen';
 
 const MainLayout: React.FC = () => {
-  const { currentUser, loginUser } = useApp();
+  const { currentUser, loginUser, authLoading, persistenceError, clearPersistenceError } = useApp();
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [initialPatientForClinical, setInitialPatientForClinical] = useState<string | undefined>(undefined);
@@ -43,10 +43,27 @@ const MainLayout: React.FC = () => {
     }
   }, [currentUser?.role]);
 
-  // If not authenticated, render login/registration screen
+  // REQUIREMENT 2: Display safe loading screen while checking auth session
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
+        <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-teal-600 to-emerald-500 flex items-center justify-center text-white font-bold text-2xl shadow-xl shadow-teal-500/20 mb-4 animate-pulse">
+          Ψ
+        </div>
+        <div className="flex items-center gap-2.5 text-slate-700 font-semibold text-sm">
+          <div className="w-4 h-4 border-2 border-teal-600 border-t-transparent rounded-full animate-spin" />
+          <span>Verificando sessão segura...</span>
+        </div>
+        <p className="text-xs text-slate-400 mt-1">Projeto Psi • Gestão Clínica Especializada</p>
+      </div>
+    );
+  }
+
+  // REQUIREMENT 2: If not authenticated, render login/registration screen
   if (!currentUser) {
     return <AuthScreen onAuthenticated={loginUser} />;
   }
+
 
   const handleOpenClinicalRecords = (patientId: string) => {
     setInitialPatientForClinical(patientId);

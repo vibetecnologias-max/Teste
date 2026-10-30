@@ -55,22 +55,23 @@ export const PsychologistDashboard: React.FC<PsychologistDashboardProps> = ({ on
 
   const financial = calculateFinancialSummary(payments, expenses);
 
-  const handleConfirm = (id: string) => {
-    const res = confirmAppointment(id);
+  const handleConfirm = async (id: string) => {
+    const res = await confirmAppointment(id);
     if (!res.success) {
-      alert(res.error);
+      alert(res.error || 'Erro ao confirmar agendamento');
     }
   };
 
-  const handleReject = () => {
+  const handleReject = async () => {
     if (!selectedAppointmentForRejection) return;
-    const res = rejectAppointment(selectedAppointmentForRejection, rejectionReason);
+    const res = await rejectAppointment(selectedAppointmentForRejection, rejectionReason);
     if (!res.success) {
-      alert(res.error);
+      alert(res.error || 'Erro ao recusar agendamento');
     }
     setSelectedAppointmentForRejection(null);
     setRejectionReason('');
   };
+
 
   return (
     <div className="space-y-6">

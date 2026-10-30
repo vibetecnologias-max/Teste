@@ -7,9 +7,6 @@ import {
   Calendar,
   AlertCircle,
   CreditCard,
-  UserCheck,
-  ChevronDown,
-  Sparkles,
   Shield,
   Menu,
   X,
@@ -31,8 +28,8 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleMobileSidebar, isMobileS
     logout
   } = useApp();
 
-  const [showRoleMenu, setShowRoleMenu] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+
 
   if (!currentUser) return null;
 

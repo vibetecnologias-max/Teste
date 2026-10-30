@@ -29,15 +29,18 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
     auditLogs
   } = useApp();
 
-  // Check access permission: Only psychologist or superadmin
+  // Check access permission: STRICTLY ONLY the treating psychologist has access.
+  // Superadmin, clinic managers, and patients are STRICTLY PROHIBITED (CFP 01/2009 & LGPD Art. 11).
   if (!currentUser) return null;
-  const hasAccess = currentUser.role === 'psychologist' || currentUser.role === 'superadmin';
+  const hasAccess = currentUser.role === 'psychologist';
 
   const [selectedPatientId, setSelectedPatientId] = useState<string>(
     initialPatientId || (patients.length > 0 ? patients[0].id : '')
   );
   const [showNewModal, setShowNewModal] = useState(false);
   const [showPrivateNotes, setShowPrivateNotes] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // Form state
   const [sessionDate, setSessionDate] = useState(new Date().toISOString().split('T')[0]);
@@ -56,28 +59,33 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
         </div>
         <h2 className="text-lg font-bold text-slate-900 mb-2">Acesso Restrito a Prontuários Clínicos</h2>
         <p className="text-xs text-slate-600 leading-relaxed mb-6">
-          Em conformidade com a <strong>Resolução CFP nº 01/2009</strong> (Conselho Federal de Psicologia) e o <strong>Artigo 11 da Lei Geral de Proteção de Dados (LGPD)</strong>, registros de evolução clínica e anotações psicoterapêuticas são estritamente confidenciais e de posse exclusiva do psicólogo responsável.
+          Em conformidade com a <strong>Resolução CFP nº 01/2009</strong> (Conselho Federal de Psicologia) e o <strong>Artigo 11 da Lei Geral de Proteção de Dados (LGPD)</strong>, registros de evolução clínica e anotações psicoterapêuticas são estritamente confidenciais e de posse exclusiva do psicólogo responsável pelo atendimento.
         </p>
         <div className="p-3 bg-slate-50 rounded-xl text-left border border-slate-200 text-xs text-slate-500 space-y-1">
           <div className="font-semibold text-slate-700">Políticas de Segurança do Projeto Psi:</div>
-          <div>• Gestores de clínica não possuem permissão para leitura de notas clínicas.</div>
-          <div>• Pacientes não têm acesso às notas de evolução internas do profissional.</div>
-          <div>• Tentativas de acesso indevido são registradas em trilha de auditoria.</div>
+          <div>• <strong>Superadministradores</strong> administram a infraestrutura técnica sem acesso a registros médicos ou evoluções de pacientes.</div>
+          <div>• <strong>Gestores de clínica</strong> gerenciam apenas agendas, financeiro e consultórios físicos.</div>
+          <div>• <strong>Pacientes</strong> acessam apenas recibos e solicitações de agendamento no portal.</div>
+          <div>• Violações de permissão são bloqueadas em nível de regra do banco de dados e registradas para auditoria.</div>
         </div>
       </div>
     );
   }
 
   const selectedPatient = patients.find(p => p.id === selectedPatientId);
+  // Strictly filter records belonging ONLY to this authenticated psychologist
   const patientRecords = clinicalRecords
-    .filter(r => r.patientId === selectedPatientId)
+    .filter(r => r.patientId === selectedPatientId && r.psychologistId === currentUser.uid)
     .sort((a, b) => b.sessionNumber - a.sessionNumber);
 
-  const handleCreateRecord = (e: React.FormEvent) => {
+  const handleCreateRecord = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedPatientId || !evolutionNotes.trim()) return;
 
-    const res = addClinicalRecord({
+    setIsSubmitting(true);
+    setSubmitError(null);
+
+    const res = await addClinicalRecord({
       psychologistId: currentUser.uid,
       patientId: selectedPatientId,
       sessionDate,
@@ -89,6 +97,8 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
       conductPlan
     });
 
+    setIsSubmitting(false);
+
     if (res.success) {
       setShowNewModal(false);
       // Reset form
@@ -99,9 +109,10 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
       setConductPlan('');
       setSessionNumber(prev => prev + 1);
     } else {
-      alert(res.error);
+      setSubmitError(res.error || 'Erro ao gravar prontuário no Firestore.');
     }
   };
+
 
   return (
     <div className="space-y-6">
@@ -376,22 +387,34 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
                 />
               </div>
 
+              {submitError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl text-xs flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{submitError}</span>
+                </div>
+              )}
+
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+
                 <button
                   type="button"
                   onClick={() => setShowNewModal(false)}
+                  disabled={isSubmitting}
                   className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-medium"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-bold shadow-2xs"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-bold shadow-2xs flex items-center gap-2 disabled:opacity-50"
                 >
-                  Salvar Evolução com Sigilo
+                  {isSubmitting && <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                  <span>{isSubmitting ? 'Gravando no Firestore...' : 'Salvar Evolução com Sigilo'}</span>
                 </button>
               </div>
             </form>
+
           </div>
         </div>
       )}

@@ -6,7 +6,6 @@ import {
   loginWithGoogle
 } from '../../services/authService';
 import { UserProfile, UserRole } from '../../types';
-import { SEED_USERS } from '../../data/seedData';
 import {
   Lock,
   Mail,
@@ -18,7 +17,6 @@ import {
   ArrowRight,
   AlertCircle,
   CheckCircle2,
-  Sparkles,
   KeyRound
 } from 'lucide-react';
 
@@ -124,12 +122,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
     } finally {
       setLoading(false);
     }
-  };
-
-  // Instant pre-configured login for fast testing
-  const handleQuickLogin = (userIndex: number) => {
-    const selected = SEED_USERS[userIndex];
-    onAuthenticated(selected);
   };
 
   return (
@@ -411,43 +403,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
               </svg>
               <span>Continuar com Google</span>
             </button>
-          </div>
-
-          {/* Quick Demo Access for Evaluators */}
-          <div className="pt-3 border-t border-slate-100">
-            <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-500 mb-2">
-              <Sparkles className="w-3.5 h-3.5 text-teal-600" />
-              <span>Acesso Rápido para Testes e Homologação:</span>
-            </div>
-
-            <div className="grid grid-cols-3 gap-1.5 text-[10px]">
-              <button
-                type="button"
-                onClick={() => handleQuickLogin(0)}
-                className="p-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-teal-50 hover:border-teal-300 text-left transition-colors"
-              >
-                <div className="font-bold text-slate-800 truncate">Dr. Marcos</div>
-                <div className="text-teal-700">Psicólogo</div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleQuickLogin(1)}
-                className="p-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 text-left transition-colors"
-              >
-                <div className="font-bold text-slate-800 truncate">Dra. Beatriz</div>
-                <div className="text-blue-700">Gestora</div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleQuickLogin(2)}
-                className="p-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-purple-50 hover:border-purple-300 text-left transition-colors"
-              >
-                <div className="font-bold text-slate-800 truncate">Juliana Prado</div>
-                <div className="text-purple-700">Paciente</div>
-              </button>
-            </div>
           </div>
         </div>
 

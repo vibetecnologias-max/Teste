@@ -54,7 +54,7 @@ export const ScheduleCalendar: React.FC = () => {
     return true;
   });
 
-  const handleCreateAppointment = (e: React.FormEvent) => {
+  const handleCreateAppointment = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
 
@@ -73,7 +73,7 @@ export const ScheduleCalendar: React.FC = () => {
       patientId = `temp_${Date.now()}`;
     }
 
-    const res = requestAppointment({
+    const res = await requestAppointment({
       psychologistId: currentUser.uid,
       patientId,
       patientName,
@@ -94,10 +94,11 @@ export const ScheduleCalendar: React.FC = () => {
 
     // Auto-confirm if created by psychologist directly
     if (res.appointment && currentUser.role === 'psychologist') {
-      confirmAppointment(res.appointment.id);
+      await confirmAppointment(res.appointment.id);
     }
 
     setShowNewModal(false);
+
     // reset form
     setFormNotes('');
     setCustomPatientName('');

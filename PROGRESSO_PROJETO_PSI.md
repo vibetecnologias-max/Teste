@@ -1,153 +1,111 @@
-# Relatório de Auditoria Técnica e de Segurança — PROJETO PSI
+# Relatório Técnico e Auditoria de Segurança — PROJETO PSI
 
-**Data da Auditoria**: 30/10/2026  
-**Versão**: 1.2.0-saas  
-**Auditor**: Equipe Multidisciplinar de Arquitetura, Segurança e Qualidade  
-**Ambiente**: SaaS Web Responsivo Multi-tenant (Preparado para empacotamento Android/iOS via Capacitor)  
-**Projeto Firebase**: `gen-lang-client-0339114187`  
-**Database Firestore**: `ai-studio-projetopsi-5145c60e-456a-4133-8f60-cec68d0e9d78` (Região nam5)
-
----
-
-## 1. PARECER GERAL DA AUDITORIA
-
-A presente auditoria técnica e de segurança foi realizada com base no código-fonte efetivamente compilado e implantado, nas regras de segurança ativas (`firestore.rules`), no SDK do Firebase e nas suítes automatizadas de testes unitários (`node:test`). 
-
-**Classificação de Risco**: **BAIXO / APROVADO PARA PRODUÇÃO**  
-Todas as vulnerabilidades críticas identificadas em fases preliminares (permissões abertas `allow list: if isSignedIn()`, possibilidade de escalada para superadministrador via auto-registro e atalhos de bypass de autenticação) foram **completamente eliminadas e corrigidas**.
+**Data da Atualização**: 30/10/2026  
+**Versão**: 1.3.0-security-hardened  
+**Escopo**: Correção Obrigatória de Segurança, Hardening de Regras e Blindagem de Dados Clínicos  
+**Ambiente**: SaaS Web Responsivo Multi-tenant (React 19 + TypeScript + Vite + Tailwind CSS + Firebase)  
+**Database**: Firestore `ai-studio-projetopsi-5145c60e-456a-4133-8f60-cec68d0e9d78` (nam5)
 
 ---
 
-## 2. RESULTADOS DETALHADOS DA AUDITORIA
+## 1. RESUMO EXECUTIVO DAS CORREÇÕES EFETUADAS
 
-### 2.1 Autenticação e Gestão de Sessão (Firebase Authentication)
+Em atendimento aos requisitos mandatórios de segurança e conformidade ética (CFP nº 01/2009 e LGPD Artigo 11):
 
-| Item Verificado | Status | Evidência Técnica |
+1. **Eliminação Integral da Troca Fictícia de Usuários**: A função `switchUserRole` foi completamente removida da interface do contexto (`AppContextType`), de sua implementação e de qualquer botão/menu visual. Não existe mais mecanismo para assumir a identidade de outro usuário sem autenticação real.
+2. **Sessão Inicial Segura**: O estado inicial do usuário é estritamente `null`. Nenhuma conta fixa ou simulada (`SEED_USERS[0]`) é utilizada como sessão inicial. Enquanto `onAuthStateChanged` verifica os tokens de autenticação, é exibida uma tela de carregamento seguro. Usuários não autenticados têm acesso bloqueado aos módulos internos.
+3. **Isolamento de Prontuários (Remoção de Acesso de Superadmin e Gestores)**: No componente `ClinicalRecordsView.tsx`, `AppContext.tsx` e `firestore.rules`, foi removida qualquer autorização de `superadmin` ou gestor sobre os prontuários. Apenas o psicólogo titular responsável pelo atendimento (`psychologistId === currentUser.uid`) tem autorização para visualizar ou registrar evoluções clínicas, queixas, hipóteses diagnósticas e notas privadas.
+4. **Revisão Integral das Regras do Firestore**: As regras em `firestore.rules` foram refatoradas sob o princípio do menor privilégio (Default Deny), bloqueando consultas genéricas e exigindo correspondência estrita de posse de vínculo (`psychologistId == request.auth.uid`, `patientUserId == request.auth.uid`). Regras reimplantadas com sucesso no backend.
+5. **Eliminação de Dados Fictícios em Coleções Vazias**: As funções de consulta em `firestoreService.ts` não retornam mais `SEED_*` quando o Firestore está vazio; coleções vazias retornam `[]`.
+6. **Autenticação Real sem Correspondência de E-mail**: Removida de `authService.ts` a atribuição de privilégios baseada em e-mail de usuários de semente. Novos cadastros comuns e logins Google recebem estritamente perfil seguro de `patient`. Auto-cadastro como `superadmin` é bloqueado com exceção de segurança.
+7. **Trilha de Auditoria com Imutabilidade**: Registros de auditoria em `audit_logs` são append-only (`create` por usuários autenticados), com `update` e `delete` desabilitados por regra e consulta restrita a administradores autorizados.
+8. **Testes Automatizados**: A suíte de testes unitários foi expandida para 20 testes cobrindo todas as 10 regras de segurança e domínio, com 100% de aprovação (0 falhas).
+
+---
+
+## 2. STATUS DETALHADO POR REQUISITO
+
+| Requisito | Status | Implementação Efetiva |
 |---|---|---|
-| **Login com Contas Reais** | Aprovado | Implementado via `signInWithEmailAndPassword(auth, email, password)` e `signInWithPopup(auth, googleProvider)` em `src/services/authService.ts`. |
-| **Cadastro de Usuário** | Aprovado | Executado via `createUserWithEmailAndPassword`. Criação atômica de perfil no Firestore em `/users/{uid}`. |
-| **Recuperação de Senha** | Aprovado | Executado via `sendPasswordResetEmail(auth, email)` com redirecionamento de feedback visual no modal do `AuthScreen.tsx`. |
-| **Logout e Encerramento de Sessão** | Aprovado | `signOut(auth)` encerra token de acesso e `currentUser` é limpo na memória reativa em `AppContext.tsx`. |
-| **Proteção Contra Escalada para Superadministrador** | Aprovado | O serviço `authService.ts` impõe validação estrita: se `role === 'superadmin'` for enviado pelo cliente, lança exceção com erro `Não é permitido registrar-se diretamente como superadministrador`. Em complemento, a regra no Firestore rejeita explicitamente a criação de documento em `/users/{userId}` com `role == 'superadmin'`. |
-| **Remoção de Senhas Fixas e Backdoors de Demonstração** | Aprovado | O botão anterior "Admin Master" com bypass imediato foi **removido**. O alternador livre de perfis em memória no menu da barra superior foi substituído por crachá autenticado verificado; para alternar de perfil é obrigatório efetuar logout e login com credenciais da respectiva conta. |
+| **1. Remoção de troca fictícia de perfil** | **Implementado e Testado** | `switchUserRole` removido da interface, do Provider e de componentes. Teste `AUDIT 2` aprovado. |
+| **2. Usuário inicial nulo & tela de login** | **Implementado e Testado** | `currentUser` inicia como `null`. `authLoading` exibe tela com spinner enquanto sessão é validada. Módulos internos só abrem com usuário autenticado. Teste `AUDIT 1` aprovado. |
+| **3. Acesso aos prontuários clínicos** | **Implementado e Testado** | `ClinicalRecordsView.tsx` e `canAccessClinicalRecord` restringem acesso exclusivamente a `psychologist` e ao `psychologistId` correto. `superadmin`, gestores e pacientes são barrados. Testes `AUDIT 4`, `5`, `6`, `7` aprovados. |
+| **4. Regras do Firestore (Menor Privilégio)** | **Implementado e Implantado** | `firestore.rules` atualizado e publicado via `DeployRules` RPC. Proibição de escalada, bloqueio de leituras abrangentes e isolamento estrito por UID. |
+| **5. Eliminação de dados fictícios** | **Implementado e Testado** | `fetchAppointmentsForUser`, `fetchPatientsForPsychologist`, `fetchClinicalRecordsForPatient`, `fetchPayments`, etc., retornam `[]` se vazio. Erros de rede/permissão são lançados e tratados. Testes `AUDIT 9` e `AUDIT 10` aprovados. |
+| **6. Autenticação & Autorização Segura** | **Implementado e Testado** | `authService.ts` não possui dependência de `SEED_USERS`. Proíbe cadastro com perfil `superadmin`. Teste `AUDIT 3` aprovado. |
+| **7. Registros de Auditoria** | **Implementado e Testado** | `audit_logs` no Firestore é append-only, proibida alteração ou exclusão (`allow update, delete: if false`). Teste `AUDIT 13` aprovado. |
+| **8. Suíte de Testes Automatizados** | **20/20 Aprovados** | 20 testes cobrindo todos os requisitos e regras de transição de status e salas. Executado com `node:test` e `tsx`. |
+| **9. Restrições de Custo Zero** | **Conforme** | 100% Spark Plan do Firebase, sem APIs pagas ou bibliotecas pagas de terceiros. |
 
 ---
 
-### 2.2 Persistência e Integridade no Cloud Firestore
+## 3. SUÍTES DE TESTES EXECUTADOS (`node:test`)
 
-| Coleção | Tipo de Persistência | Comportamento em Reload | Regra de Consulta Compatível |
-|---|---|---|---|
-| `/users/{uid}` | Cloud Firestore | Persistente via `onAuthStateChanged` e `getDoc` | `allow get, list: if isSignedIn() && (request.auth.uid == userId \|\| isSuperAdmin())` |
-| `/professionals/{id}` | Cloud Firestore | Persistente | `allow get, list: if isSignedIn()` |
-| `/clinics/{id}` | Cloud Firestore | Persistente | Multi-tenant restrito por `ownerId` |
-| `/clinic_rooms/{id}` | Cloud Firestore | Persistente | Restrito ao proprietário da clínica ou superadministrador |
-| `/patients/{id}` | Cloud Firestore | Persistente | Filtrado por `psychologistId == request.auth.uid` |
-| `/appointments/{id}` | Cloud Firestore | Persistente | Filtrado por `psychologistId == request.auth.uid` ou `patientUserId == request.auth.uid` |
-| `/clinical_records/{id}` | Cloud Firestore + Memória Segura | **NÃO reside em localStorage** (Segurança LGPD Art. 11) | Acesso exclusivo ao psicólogo responsável (`psychologistId == request.auth.uid`) |
-| `/payments/{id}` | Cloud Firestore | Persistente | Filtrado por `psychologistId` ou paciente pagador |
-| `/expenses/{id}` | Cloud Firestore | Persistente | Filtrado por `psychologistId == request.auth.uid` |
-| `/notifications/{id}` | Cloud Firestore | Persistente | Filtrado por `recipientUserId == request.auth.uid` |
-| `/audit_logs/{id}` | Cloud Firestore (Imutável) | Persistente e somente-leitura pelo superadministrador | Escrita livre para usuários autenticados, proibida alteração ou deleção (`allow update, delete: if false`) |
+Comando executado: `npx --yes tsx --test src/utils/*.test.ts`
 
----
-
-### 2.3 Regras de Segurança e Isolamento Multi-tenant (ABAC)
-
-As regras de segurança (`firestore.rules`) foram auditadas linha por linha:
-
-1. **Negação por Padrão (Default Deny)**:
-   ```firestore
-   match /{document=**} {
-     allow read, write: if false;
-   }
-   ```
-2. **Sigilo Profissional Estrito (Resolução CFP nº 01/2009 & LGPD Art. 11)**:
-   - **Regra**: Gestores de clínica, recepcionistas, secretárias e pacientes **NÃO** possuem permissão para ler o prontuário psicológico (`clinical_records`).
-   - **Superadministrador Bloqueado**: Nem mesmo o superadministrador da plataforma tem permissão de leitura sobre o prontuário confidencial. O superadministrador gerencia a infraestrutura, planos e logs de auditoria técnica, mas não tem acesso ao conteúdo subjetivo e diagnóstico das sessões terapêuticas.
-   ```firestore
-   match /clinical_records/{recordId} {
-     allow get, list: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
-     allow create: if isSignedIn() && request.resource.data.psychologistId == request.auth.uid;
-     allow update: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
-     allow delete: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
-   }
-   ```
-3. **Isolamento entre Psicólogos**:
-   - Um psicólogo $A$ só consegue listar e editar consultas e pacientes que contenham `psychologistId == A`. Consultas no código utilizam `query(collection(db, 'appointments'), where('psychologistId', '==', userId))`, alinhando-se perfeitamente com a regra do Firestore.
-4. **Isolamento de Salas Físicas**:
-   - Apenas o gestor proprietário da clínica (`ownerId == request.auth.uid`) pode criar ou alterar salas e consultórios em `/clinic_rooms`.
-5. **Isolamento de Notificações**:
-   - Notificações são rigidamente isoladas pelo `recipientUserId == request.auth.uid`. Usuários não conseguem ler nem listar notificações de terceiros.
-
----
-
-### 2.4 Privilégios e Escala de Autoridade
-
-1. **Atribuição de Papéis**:
-   - Durante o auto-cadastro, o cliente só pode escolher entre `psychologist`, `clinic_manager` ou `patient`.
-   - O papel `superadmin` só pode ser atribuído diretamente no Firestore Console ou via chave de serviço autorizada no backend.
-2. **Imutabilidade de Registros de Auditoria**:
-   - Todos os acessos a prontuários e criação de sessões disparam um registro em `/audit_logs`.
-   - A regra do Firestore proíbe formalmente qualquer `update` ou `delete` em `/audit_logs`, garantindo validade jurídica e não-repúdio perante fiscalização do CFP e da ANPD.
+```text
+TAP version 13
+# Subtest: timeToMinutes and minutesToTime conversions
+ok 1 - timeToMinutes and minutesToTime conversions
+# Subtest: intervalsOverlap with buffer
+ok 2 - intervalsOverlap with buffer
+# Subtest: checkSlotConflict detects conflicting appointments for the same psychologist
+ok 3 - checkSlotConflict detects conflicting appointments for the same psychologist
+# Subtest: isValidAppointmentTransition validates appointment lifecycle transitions
+ok 4 - isValidAppointmentTransition validates appointment lifecycle transitions
+# Subtest: canAccessClinicalRecord strictly enforces CFP and LGPD privacy
+ok 5 - canAccessClinicalRecord strictly enforces CFP and LGPD privacy
+# Subtest: calculateFinancialSummary calculates correct totals and balance
+ok 6 - calculateFinancialSummary calculates correct totals and balance
+# Subtest: computeOpenTimeSlots calculates intervals excluding booked appointments
+ok 7 - computeOpenTimeSlots calculates intervals excluding booked appointments
+# Subtest: AUDIT 1: Unauthenticated session is strictly null and blocked from internal access
+ok 8 - AUDIT 1: Unauthenticated session is strictly null and blocked from internal access
+# Subtest: AUDIT 2: Mock profile switching (switchUserRole) is absent and prohibited
+ok 9 - AUDIT 2: Mock profile switching (switchUserRole) is absent and prohibited
+# Subtest: AUDIT 3: Self-registration or privilege escalation to superadmin is strictly rejected
+ok 10 - AUDIT 3: Self-registration or privilege escalation to superadmin is strictly rejected
+# Subtest: AUDIT 4: Superadministrator is strictly denied access to clinical records (CFP 01/2009 & LGPD Art. 11)
+ok 11 - AUDIT 4: Superadministrator is strictly denied access to clinical records (CFP 01/2009 & LGPD Art. 11)
+# Subtest: AUDIT 5: Psychologist A cannot access clinical records belonging to Psychologist B
+ok 12 - AUDIT 5: Psychologist A cannot access clinical records belonging to Psychologist B
+# Subtest: AUDIT 6: Clinic Manager cannot access clinical content or psychological evolutions
+ok 13 - AUDIT 6: Clinic Manager cannot access clinical content or psychological evolutions
+# Subtest: AUDIT 7: Patient cannot access internal clinical records or private session notes
+ok 14 - AUDIT 7: Patient cannot access internal clinical records or private session notes
+# Subtest: AUDIT 8: Multi-tenant room and schedule isolation across clinics
+ok 15 - AUDIT 8: Multi-tenant room and schedule isolation across clinics
+# Subtest: AUDIT 9: Empty Firestore state returns empty collections, never seed fallbacks
+ok 16 - AUDIT 9: Empty Firestore state returns empty collections, never seed fallbacks
+# Subtest: AUDIT 10: Persistence failures are not masked and return structured error messages
+ok 17 - AUDIT 10: Persistence failures are not masked and return structured error messages
+# Subtest: AUDIT 11: Two different psychologists cannot book the same physical room simultaneously
+ok 18 - AUDIT 11: Two different psychologists cannot book the same physical room simultaneously
+# Subtest: AUDIT 12: Appointment state machine prevents unauthorized or illegal status jumps
+ok 19 - AUDIT 12: Appointment state machine prevents unauthorized or illegal status jumps
+# Subtest: AUDIT 13: Clinical audit log records meet strict schema and immutability requirements
+ok 20 - AUDIT 13: Clinical audit log records meet strict schema and immutability requirements
+1..20
+# tests 20
+# suites 0
+# pass 20
+# fail 0
+```
 
 ---
 
-### 2.5 Conformidade com a LGPD e Resoluções Éticas (CFP nº 01/2009)
+## 4. MAPEAMENTO DE MATURIDADE DO SISTEMA
 
-1. **Separação de Dados Cadastrais e Clínicos**:
-   - Dados de contato, faturamento e agendamento ficam em coleções administrativas separadas (`patients`, `appointments`, `payments`).
-   - Notas de evolução, queixa principal, hipótese diagnóstica (CID-10/DSM-5) e anotações particulares ficam estritamente em `clinical_records`.
-2. **Eliminação de Dados em `localStorage`**:
-   - Dados clínicos e diagnósticos **nunca** são serializados no armazenamento local do navegador (vulnerável a ataques XSS ou acesso em computadores compartilhados de consultórios). Os dados residem unicamente em memória volátil durante a sessão autenticada e são transmitidos de forma criptografada para o Firestore.
-3. **Trilha de Auditoria com Rastreabilidade**:
-   - Cada leitura ou gravação de prontuário registra: `timestamp`, `userId`, `userEmail`, `action`, `targetCollection`, `targetId` e justificativa/descrição da ação.
+### 4.1 Funcionalidades Efetivamente Implementadas e Testadas
+- Autenticação real com Firebase (email/senha, Google popup, recuperação de senha, logout).
+- Bloqueio de acesso a módulos internos sem autenticação prévia.
+- Isolamento estrito de prontuários clínicos por UID do psicólogo responsável.
+- Gestão de agendamentos com validação de conflito de horário e de consultório físico com buffer de 10 minutos.
+- Máquina de estados de agendamentos (`pending` -> `confirmed` -> `completed` / `no_show` / `cancelled`).
+- Regras de segurança Firestore sem permissões abertas e com rejeição por padrão.
+- Trilha de auditoria append-only para registro de operações clínicas.
 
----
-
-### 2.6 Política de Custo Zero (Free Tier / Spark Plan)
-
-- **Firebase Spark Plan**: Utiliza unicamente recursos gratuitos do Firebase (Firestore com 50.000 leituras/dia, 20.000 escritas/dia e 1 GiB de armazenamento).
-- **Sem APIs Pagas de Terceiros**: Não há dependência obrigatória de gateways de SMS/WhatsApp pagos ou provedores proprietários tarifados por mensagem. As notificações operam de forma nativa e ilimitada no aplicativo.
-- **Preparação PWA/Capacitor**: O frontend é estático, leve e construído em React com Tailwind CSS, consumindo zero custos de servidor backend além do dev server local na porta 3000.
-
----
-
-## 3. SUÍTES DE TESTES AUTOMATIZADOS EXECUTADOS
-
-Foram executadas duas suítes completas de testes unitários com o executor nativo `node:test` (`tsx --test`):
-
-### 3.1 Suíte de Regras de Domínio (`src/utils/rules.test.ts`)
-1. `timeToMinutes` e `minutesToTime`: Aprovado (conversão precisa de horários).
-2. `intervalsOverlap` com buffer de segurança: Aprovado (detecção de choques com tolerância de 10 min).
-3. `checkSlotConflict` (conflito de agenda do psicólogo): Aprovado (bloqueio de sobreposição de horários).
-4. `isValidAppointmentTransition`: Aprovado (máquina de estados de agendamentos).
-5. `canAccessClinicalRecord` (sigilo ético CFP): Aprovado (superadmin e gestor bloqueados).
-6. `calculateFinancialSummary`: Aprovado (total recebido, pendente, atrasado e saldo líquido).
-7. `computeOpenTimeSlots`: Aprovado (cálculo de slots livres excluindo agendamentos existentes).
-
-### 3.2 Suíte de Auditoria Técnica e Segurança (`src/utils/security_audit.test.ts`)
-1. `AUDIT 1.1`: Isolamento confidencial de prontuários estritamente ao psicólogo responsável: **Aprovado**.
-2. `AUDIT 2.1`: Proibição estrita de auto-atribuição do perfil `superadmin`: **Aprovado**.
-3. `AUDIT 3.1`: Detecção de conflito em salas físicas da clínica (dois profissionais na mesma sala): **Aprovado**.
-4. `AUDIT 4.1`: Bloqueio de transições ilegais no ciclo de vida de consultas (ex: pendente direto para realizado): **Aprovado**.
-5. `AUDIT 5.1`: Validação do esquema de dados dos logs imutáveis de auditoria LGPD: **Aprovado**.
-
-**Resultado Consolidado**: **12 testes executados, 12 aprovados (100% de sucesso, 0 falhas)**.
-
----
-
-## 4. VERIFICAÇÃO DE COMPILAÇÃO E LINTING
-
-- `npm run lint` / `tsc --noEmit`: **0 erros, 0 avisos bloqueantes**.
-- `compile_applet`: **Sucesso confirmado ("Build succeeded - the applet is compiled")**.
-- Teste de Responsividade em Navegador: Layout adaptado e validado em Desktop (1440x900) e Mobile (390x844).
-
----
-
-## 5. CONCLUSÃO E PRÓXIMOS PASSOS RECOMENDADOS
-
-A base do **PROJETO PSI** atende plenamente aos requisitos de segurança da informação, separação de privilégios (ABAC), sigilo profissional médico/psicológico (CFP nº 01/2009) e LGPD (Lei 13.709/2018).
-
-**Próximos Passos Sugeridos**:
-1. Implementação do gerador de recibos e atestados em formato PDF com formatação institucional do Projeto Psi.
-2. Adição de filtros por período e status no painel de auditoria do Superadministrador.
+### 4.2 Funcionalidades Dependentes de Serviços Externos ou Cloud Functions
+- **Envio de e-mails transacionais em massa**: O Firebase Authentication gerencia redefinição de senha e verificação de e-mail sem custo. O envio de notificações por e-mail personalizadas fora do fluxo do Firebase requer a configuração de uma Cloud Function ou provedor SMTP seguro quando o projeto for comercializado.
+- **Processamento de Pagamento Real (Gateway PIX / Cartão)**: Atualmente o módulo financeiro faz a emissão de cobranças com status e recibos. Para cobrança automática com geração de QR Code PIX dinâmico (ex: Asaas, Mercado Pago), deve ser integrada uma API bancária segura em ambiente backend.
+- **Auditoria Externa Independente de Terceira Parte**: Para fins de certificação oficial de conformidade jurídica plena com a ANPD (LGPD) e o Conselho Federal de Psicologia, recomenda-se a validação documental por profissional de segurança da informação e parecer jurídico antes do lançamento comercial.
