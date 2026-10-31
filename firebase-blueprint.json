@@ -20,7 +20,7 @@
     },
     "Professional": {
       "title": "Professional",
-      "description": "Psychologist professional credentials and clinical settings.",
+      "description": "Psychologist private profile with administrative contact data accessible only by owner or superadmin.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
@@ -29,6 +29,22 @@
         "crp": { "type": "string", "maxLength": 40 },
         "email": { "type": "string", "maxLength": 255 },
         "phone": { "type": "string", "maxLength": 30 },
+        "bio": { "type": "string", "maxLength": 1000 },
+        "sessionDurationMinutes": { "type": "number" },
+        "sessionPrice": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "inactive"] }
+      },
+      "required": ["id", "userId", "name", "crp"]
+    },
+    "ProfessionalPublic": {
+      "title": "ProfessionalPublic",
+      "description": "Public directory profile of psychologists containing only non-sensitive clinical practice info.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 120 },
+        "crp": { "type": "string", "maxLength": 40 },
         "bio": { "type": "string", "maxLength": 1000 },
         "sessionDurationMinutes": { "type": "number" },
         "sessionPrice": { "type": "number" },
@@ -90,7 +106,8 @@
         "sessionNumber": { "type": "number" },
         "evolutionNotes": { "type": "string", "maxLength": 10000 },
         "privateNotes": { "type": "string", "maxLength": 10000 },
-        "diagnosticHypothesis": { "type": "string", "maxLength": 2000 }
+        "diagnosticHypothesis": { "type": "string", "maxLength": 2000 },
+        "retificationNotes": { "type": "string", "maxLength": 2000 }
       },
       "required": ["id", "psychologistId", "patientId", "sessionDate", "evolutionNotes"]
     },
@@ -137,6 +154,7 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "name": { "type": "string", "maxLength": 150 },
+        "tradeName": { "type": "string", "maxLength": 150 },
         "cnpj": { "type": "string", "maxLength": 25 },
         "ownerId": { "type": "string", "maxLength": 128 },
         "phone": { "type": "string", "maxLength": 30 },
@@ -194,19 +212,20 @@
     },
     "AuditLog": {
       "title": "AuditLog",
-      "description": "Immutable audit log tracking access to clinical records and critical operations.",
+      "description": "Immutable security audit records with structured metadata only, excluding narrative clinical records and credentials.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "userId": { "type": "string", "maxLength": 128 },
         "userEmail": { "type": "string", "maxLength": 255 },
-        "action": { "type": "string", "maxLength": 80 },
-        "targetCollection": { "type": "string", "maxLength": 80 },
+        "action": { "type": "string", "enum": ["read_clinical_record", "create_clinical_record", "update_clinical_record", "cancel_appointment", "role_change"] },
+        "eventCode": { "type": "string", "enum": ["CLINICAL_RECORD_VIEWED", "CLINICAL_RECORD_CREATED", "CLINICAL_RECORD_RECTIFIED", "APPOINTMENT_CANCELLED", "USER_ROLE_CHANGED"] },
+        "targetCollection": { "type": "string", "enum": ["clinical_records", "appointments", "users", "patients"] },
         "targetId": { "type": "string", "maxLength": 128 },
-        "details": { "type": "string", "maxLength": 1000 },
+        "details": { "type": "string", "maxLength": 300 },
         "timestamp": { "type": "string" }
       },
-      "required": ["id", "userId", "action", "targetId", "timestamp"]
+      "required": ["id", "userId", "action", "eventCode", "targetCollection", "targetId", "details", "timestamp"]
     }
   },
   "firestore": {
@@ -216,7 +235,11 @@
     },
     "/professionals/{professionalId}": {
       "schema": "Professional",
-      "description": "Psychologist public and professional profiles."
+      "description": "Psychologist private profile with administrative contact data."
+    },
+    "/professionals_public/{professionalId}": {
+      "schema": "ProfessionalPublic",
+      "description": "Public directory of psychologists for appointment booking."
     },
     "/patients/{patientId}": {
       "schema": "Patient",

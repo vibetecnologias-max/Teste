@@ -13,7 +13,9 @@ import {
   ChevronDown,
   CheckCircle2,
   Eye,
-  EyeOff
+  EyeOff,
+  FileEdit,
+  History
 } from 'lucide-react';
 
 interface ClinicalRecordsViewProps {
@@ -26,6 +28,7 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
     patients,
     clinicalRecords,
     addClinicalRecord,
+    retifyClinicalRecord,
     auditLogs
   } = useApp();
 
@@ -41,6 +44,13 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
   const [showPrivateNotes, setShowPrivateNotes] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // Rectification state (CFP 01/2009 Art. 12: immutable records with structured rectification)
+  const [retifyingRecord, setRetifyingRecord] = useState<ClinicalRecord | null>(null);
+  const [retificationText, setRetificationText] = useState('');
+  const [retificationReason, setRetificationReason] = useState('');
+  const [isRetifying, setIsRetifying] = useState(false);
+  const [retificationError, setRetificationError] = useState<string | null>(null);
 
   // Form state
   const [sessionDate, setSessionDate] = useState(new Date().toISOString().split('T')[0]);
@@ -110,6 +120,37 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
       setSessionNumber(prev => prev + 1);
     } else {
       setSubmitError(res.error || 'Erro ao gravar prontuário no Firestore.');
+    }
+  };
+
+  const handleRetifyRecord = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!retifyingRecord || !retificationText.trim() || !retificationReason.trim()) return;
+
+    setIsRetifying(true);
+    setRetificationError(null);
+
+    const timestamp = new Date().toLocaleString('pt-BR');
+    const newEntry = `[RETIFICAÇÃO em ${timestamp} por ${currentUser.displayName} • Motivo: ${retificationReason.trim()}]\n${retificationText.trim()}`;
+    const consolidatedNotes = retifyingRecord.retificationNotes
+      ? `${newEntry}\n\n---\n${retifyingRecord.retificationNotes}`
+      : newEntry;
+
+    const res = await retifyClinicalRecord(
+      retifyingRecord.id,
+      {
+        retificationNotes: consolidatedNotes
+      }
+    );
+
+    setIsRetifying(false);
+
+    if (res.success) {
+      setRetifyingRecord(null);
+      setRetificationText('');
+      setRetificationReason('');
+    } else {
+      setRetificationError(res.error || 'Erro ao registrar retificação no Firestore.');
     }
   };
 
@@ -281,6 +322,40 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
                   )}
                 </div>
               )}
+
+              {/* Rectification Notes (CFP 01/2009 Art. 12: strictly preserves original record) */}
+              {rec.retificationNotes && (
+                <div className="p-3 rounded-lg bg-indigo-50/70 border border-indigo-200 text-xs">
+                  <div className="flex items-center gap-1.5 font-bold text-indigo-900 mb-1">
+                    <History className="w-3.5 h-3.5 text-indigo-700" />
+                    <span>Termo de Retificação Registrado (CFP nº 01/2009):</span>
+                  </div>
+                  <div className="text-slate-800 whitespace-pre-line leading-relaxed font-mono text-[11px] bg-white p-2.5 rounded border border-indigo-100">
+                    {rec.retificationNotes}
+                  </div>
+                </div>
+              )}
+
+              {/* Record Footer: Legal Retention & Rectification Action */}
+              <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-t border-slate-100 text-[11px] text-slate-500">
+                <span className="flex items-center gap-1 text-slate-400">
+                  <Lock className="w-3 h-3 text-slate-400" />
+                  <span>Guarda legal mínima 5 anos: exclusão proibida (CFP 01/2009 Art. 12)</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRetifyingRecord(rec);
+                    setRetificationText('');
+                    setRetificationReason('');
+                    setRetificationError(null);
+                  }}
+                  className="px-2.5 py-1 text-xs font-semibold text-teal-700 hover:text-teal-900 hover:bg-teal-50 rounded-lg flex items-center gap-1 border border-teal-200 transition-colors w-fit"
+                >
+                  <FileEdit className="w-3.5 h-3.5 text-teal-600" />
+                  <span>Retificar Prontuário</span>
+                </button>
+              </div>
             </div>
           ))
         )}
@@ -415,6 +490,99 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
               </div>
             </form>
 
+          </div>
+        </div>
+      )}
+
+      {/* Clinical Record Rectification Modal (CFP 01/2009 Art. 12) */}
+      {retifyingRecord && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-slate-200 max-h-[92vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <div className="flex items-center gap-2">
+                <FileEdit className="w-5 h-5 text-teal-600" />
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Retificar Evolução • Sessão #{retifyingRecord.sessionNumber}
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Data original: {retifyingRecord.sessionDate.split('-').reverse().join('/')} (imutável)
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setRetifyingRecord(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-xl text-xs text-amber-900 mb-4 space-y-1">
+              <div className="font-bold flex items-center gap-1.5 text-amber-800">
+                <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>Norma Deontológica (CFP nº 01/2009 Art. 12)</span>
+              </div>
+              <p className="text-[11px] leading-relaxed text-amber-800">
+                Os registros originais da sessão são legalmente imutáveis e protegidos contra exclusão. As retificações são adicionadas como adendos cronológicos auditados, contendo justificativa técnica, data, hora e identificação do psicólogo titular.
+              </p>
+            </div>
+
+            <form onSubmit={handleRetifyRecord} className="space-y-4 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Justificativa Técnica da Retificação *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={retificationReason}
+                  onChange={(e) => setRetificationReason(e.target.value)}
+                  placeholder="Ex: Correção de hipótese diagnóstica após discussão clínica / supervisão."
+                  className="w-full p-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-teal-500"
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Texto do Adendo / Nota de Retificação *
+                </label>
+                <textarea
+                  required
+                  rows={4}
+                  value={retificationText}
+                  onChange={(e) => setRetificationText(e.target.value)}
+                  placeholder="Descreva o adendo explicativo, dados complementares ou esclarecimento técnico..."
+                  className="w-full p-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-teal-500 leading-relaxed"
+                />
+              </div>
+
+              {retificationError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl text-xs flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{retificationError}</span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setRetifyingRecord(null)}
+                  disabled={isRetifying}
+                  className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-medium"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isRetifying}
+                  className="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-bold shadow-2xs flex items-center gap-2 disabled:opacity-50"
+                >
+                  {isRetifying && <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                  <span>{isRetifying ? 'Gravando Adendo no Firestore...' : 'Assinar e Gravar Retificação'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

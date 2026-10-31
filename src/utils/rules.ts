@@ -1,4 +1,15 @@
-import { Appointment, AppointmentStatus, PaymentRecord, ExpenseRecord, UserRole, UserProfile } from '../types';
+import {
+  Appointment,
+  AppointmentStatus,
+  PaymentRecord,
+  ExpenseRecord,
+  UserRole,
+  UserProfile,
+  Clinic,
+  ClinicalRecord,
+  AuditLog,
+  Professional
+} from '../types';
 
 /**
  * Converts a time string "HH:mm" to total minutes from midnight.
@@ -28,7 +39,6 @@ export function intervalsOverlap(
   endB: number,
   bufferMinutes: number = 0
 ): boolean {
-  // If session A plus buffer extends into session B, or B into A
   return startA < endB + bufferMinutes && endA + bufferMinutes > startB;
 }
 
@@ -120,21 +130,24 @@ export function isValidAppointmentTransition(
  * SuperAdmin, clinic managers, and patients are strictly denied access.
  */
 export function canAccessClinicalRecord(
-  requestUser: { uid: string; role: UserRole },
+  user: { uid: string; role: UserRole },
   record: { psychologistId: string }
 ): boolean {
-  if (requestUser.role === 'psychologist' && requestUser.uid === record.psychologistId) {
-    return true;
+  if (!user || !user.uid) return false;
+  // SuperAdmin, Clinic Manager, and Patient are STRICTLY DENIED access
+  if (user.role === 'superadmin' || user.role === 'clinic_manager' || user.role === 'patient') {
+    return false;
   }
-  return false;
+  // Only the assigned psychologist who owns the patient relationship
+  return user.role === 'psychologist' && user.uid === record.psychologistId;
 }
 
 /**
- * Financial metrics calculation for SaaS & Clinic dashboard.
+ * Aggregates financial totals for payments and expenses.
  */
 export function calculateFinancialSummary(
   payments: PaymentRecord[],
-  expenses: ExpenseRecord[] = []
+  expenses: ExpenseRecord[]
 ) {
   const totalReceived = payments
     .filter(p => p.status === 'paid')
@@ -189,7 +202,6 @@ export function computeOpenTimeSlots(
       const startTimeStr = minutesToTime(currentStart);
       const endTimeStr = minutesToTime(slotEnd);
 
-      // Check if slot overlaps with any booked range
       const overlaps = bookedRanges.some(booked => {
         const bStart = timeToMinutes(booked.start);
         const bEnd = timeToMinutes(booked.end);
@@ -210,6 +222,7 @@ export function computeOpenTimeSlots(
 /**
  * Validates Firestore rules for updating user profiles (/users/{userId}).
  * Regular users are strictly forbidden from modifying role, uid, status, clinicId, professionalId.
+ * SuperAdmin cannot modify uid (immutable).
  */
 export function validateUserProfileUpdate(
   existingUser: Partial<UserProfile>,
@@ -218,13 +231,36 @@ export function validateUserProfileUpdate(
   isCallerSuperAdmin: boolean = false
 ): { allowed: boolean; reason?: string } {
   if (!callerUid) return { allowed: false, reason: 'Não autenticado.' };
-  if (isCallerSuperAdmin) return { allowed: true };
+
+  // uid is strictly immutable for all callers including superadmin
+  if (existingUser.uid && incomingUser.uid && existingUser.uid !== incomingUser.uid) {
+    return { allowed: false, reason: 'uid é estritamente imutável.' };
+  }
+
+  if (isCallerSuperAdmin) {
+    const superAdminAllowedKeys = new Set([
+      'role',
+      'status',
+      'clinicId',
+      'professionalId',
+      'displayName',
+      'phone',
+      'avatarUrl',
+      'photoURL',
+      'updatedAt'
+    ]);
+    for (const key of Object.keys(incomingUser)) {
+      if ((existingUser as any)[key] !== (incomingUser as any)[key] && !superAdminAllowedKeys.has(key)) {
+        return { allowed: false, reason: `SuperAdmin não pode modificar o campo ${key}.` };
+      }
+    }
+    return { allowed: true };
+  }
 
   if (existingUser.uid !== callerUid) {
     return { allowed: false, reason: 'Usuário não pode alterar perfis de terceiros.' };
   }
 
-  // Compare all keys changed
   const allowedKeys = new Set(['displayName', 'phone', 'avatarUrl', 'photoURL', 'updatedAt']);
   const allKeys = new Set([...Object.keys(existingUser), ...Object.keys(incomingUser)]);
 
@@ -247,7 +283,8 @@ export function validateUserProfileUpdate(
 
 /**
  * Validates Firestore rules for updating appointments (/appointments/{appId}).
- * Core fields are immutable. Patients cannot perform administrative state transitions.
+ * Core fields are immutable.
+ * Role-based transition rules and field allowlists enforced.
  */
 export function validateAppointmentUpdate(
   existing: Appointment,
@@ -272,9 +309,45 @@ export function validateAppointmentUpdate(
   if (existing.roomId !== incoming.roomId) {
     return { allowed: false, reason: 'roomId é imutável após criação.' };
   }
+  if (existing.requestedBy !== incoming.requestedBy) {
+    return { allowed: false, reason: 'requestedBy é imutável após criação.' };
+  }
+  if (existing.price !== incoming.price) {
+    return { allowed: false, reason: 'Valor financeiro (price) é imutável na atualização do agendamento.' };
+  }
+  if (existing.patientName !== incoming.patientName) {
+    return { allowed: false, reason: 'patientName é imutável após criação.' };
+  }
+  if (existing.date !== incoming.date || existing.startTime !== incoming.startTime || existing.endTime !== incoming.endTime) {
+    return { allowed: false, reason: 'Data e horários do agendamento são imutáveis na atualização direta.' };
+  }
+  if (existing.durationMinutes !== incoming.durationMinutes) {
+    return { allowed: false, reason: 'durationMinutes é imutável após criação.' };
+  }
+  if (existing.createdAt !== incoming.createdAt) {
+    return { allowed: false, reason: 'createdAt é imutável.' };
+  }
 
   // Caller is treating psychologist
   if (callerUid === existing.psychologistId) {
+    const allowedPsychologistFields = new Set([
+      'status',
+      'notes',
+      'cancellationReason',
+      'paymentStatus',
+      'updatedAt'
+    ]);
+
+    for (const key of Object.keys(incoming) as (keyof Appointment)[]) {
+      if (incoming[key] !== existing[key] && !allowedPsychologistFields.has(key)) {
+        return { allowed: false, reason: `Psicólogo não tem autorização para modificar o campo ${key}.` };
+      }
+    }
+
+    if (!isValidAppointmentTransition(existing.status, incoming.status)) {
+      return { allowed: false, reason: `Transição inválida de status: de ${existing.status} para ${incoming.status}.` };
+    }
+
     return { allowed: true };
   }
 
@@ -285,12 +358,19 @@ export function validateAppointmentUpdate(
       return { allowed: false, reason: 'Paciente não tem autorização para definir status administrativos.' };
     }
 
-    // Patient can only affect status (to cancelled or cancellation_requested), cancellationReason, notes, updatedAt
     const allowedPatientFields = new Set(['status', 'cancellationReason', 'notes', 'updatedAt']);
     for (const key of Object.keys(incoming) as (keyof Appointment)[]) {
       if (incoming[key] !== existing[key] && !allowedPatientFields.has(key)) {
         return { allowed: false, reason: `Paciente não pode alterar o campo ${key}.` };
       }
+    }
+
+    if (existing.status === 'pending' && incoming.status !== 'pending' && incoming.status !== 'cancelled') {
+      return { allowed: false, reason: 'Paciente só pode cancelar solicitações pendentes.' };
+    }
+
+    if (existing.status === 'confirmed' && incoming.status !== 'confirmed' && !['cancellation_requested', 'cancelled'].includes(incoming.status)) {
+      return { allowed: false, reason: 'Paciente só pode solicitar cancelamento ou cancelar sessões confirmadas.' };
     }
 
     return { allowed: true };
@@ -331,7 +411,6 @@ export function validateNotificationUpdate(
   if (incoming.recipientUserId !== existing.recipientUserId) {
     return { allowed: false, reason: 'recipientUserId é imutável.' };
   }
-  // Check if non-allowed keys were touched
   for (const k of Object.keys(incoming)) {
     if (k !== 'read' && k !== 'updatedAt' && (incoming as any)[k] !== (existing as any)[k]) {
       return { allowed: false, reason: `Campo ${k} não pode ser alterado em notificações.` };
@@ -358,14 +437,14 @@ export function validateSubscriptionAccess(
 
 /**
  * Validates clinical record creation and update.
- * Strictly verifies treating psychologist ownership and patient linkage.
+ * Strictly verifies treating psychologist ownership, patient linkage and retention.
  */
 export function validateClinicalRecordWrite(
-  record: { psychologistId: string; patientId: string },
+  record: Partial<ClinicalRecord>,
   callerUid: string,
   patientOwnerPsychologistId: string,
   isUpdate: boolean,
-  existingRecord?: { psychologistId: string; patientId: string }
+  existingRecord?: Partial<ClinicalRecord>
 ): { allowed: boolean; reason?: string } {
   if (!callerUid) return { allowed: false, reason: 'Não autenticado.' };
 
@@ -385,7 +464,117 @@ export function validateClinicalRecordWrite(
     if (record.patientId !== existingRecord.patientId) {
       return { allowed: false, reason: 'patientId é imutável em prontuários clínicos.' };
     }
+    if (record.id !== existingRecord.id) {
+      return { allowed: false, reason: 'id é imutável em prontuários clínicos.' };
+    }
+    if (existingRecord.sessionDate && record.sessionDate !== existingRecord.sessionDate) {
+      return { allowed: false, reason: 'sessionDate é imutável após registro.' };
+    }
+    if (existingRecord.sessionNumber && record.sessionNumber !== existingRecord.sessionNumber) {
+      return { allowed: false, reason: 'sessionNumber é imutável após registro.' };
+    }
+    if (existingRecord.createdAt && record.createdAt !== existingRecord.createdAt) {
+      return { allowed: false, reason: 'createdAt é imutável.' };
+    }
+
+    const allowedUpdateKeys = new Set([
+      'evolutionNotes',
+      'privateNotes',
+      'diagnosticHypothesis',
+      'conductPlan',
+      'retificationNotes',
+      'updatedAt'
+    ]);
+
+    for (const key of Object.keys(record)) {
+      if ((existingRecord as any)[key] !== (record as any)[key] && !allowedUpdateKeys.has(key)) {
+        return { allowed: false, reason: `Campo ${key} não pode ser alterado em prontuários.` };
+      }
+    }
   }
 
   return { allowed: true };
+}
+
+/**
+ * Validates clinical record deletion.
+ * CFP nº 01/2009 Art. 12 mandates retention: clinical records cannot be deleted!
+ */
+export function validateClinicalRecordDelete(
+  record: { psychologistId: string },
+  callerUid: string,
+  isSuperAdmin: boolean = false
+): { allowed: boolean; reason?: string } {
+  return {
+    allowed: false,
+    reason: 'Exclusão estritamente proibida: prontuários clínicos possuem guarda obrigatória de no mínimo 5 anos (CFP nº 01/2009).'
+  };
+}
+
+/**
+ * Validates clinic property, settings, and ownership protection.
+ */
+export function validateClinicUpdate(
+  existingClinic: Clinic,
+  incomingClinic: Clinic,
+  callerUid: string,
+  isSuperAdmin: boolean = false
+): { allowed: boolean; reason?: string } {
+  if (!callerUid) return { allowed: false, reason: 'Não autenticado.' };
+  if (isSuperAdmin) return { allowed: true };
+
+  if (existingClinic.ownerId !== callerUid) {
+    return { allowed: false, reason: 'Apenas o proprietário da clínica ou o SuperAdmin podem atualizar dados da clínica.' };
+  }
+
+  if (incomingClinic.ownerId !== existingClinic.ownerId) {
+    return { allowed: false, reason: 'Transferência de propriedade da clínica (ownerId) não é permitida por atualização direta.' };
+  }
+
+  if (incomingClinic.id !== existingClinic.id) {
+    return { allowed: false, reason: 'Identificador da clínica é imutável.' };
+  }
+
+  if (incomingClinic.status !== existingClinic.status) {
+    return { allowed: false, reason: 'Status administrativo da clínica só pode ser alterado pelo SuperAdmin.' };
+  }
+
+  if (existingClinic.cnpj && incomingClinic.cnpj !== existingClinic.cnpj) {
+    return { allowed: false, reason: 'CNPJ da clínica é imutável na atualização do proprietário.' };
+  }
+
+  if (existingClinic.roomsCount !== undefined && incomingClinic.roomsCount !== existingClinic.roomsCount) {
+    return { allowed: false, reason: 'Limites de salas (roomsCount) contratados só podem ser alterados pelo SuperAdmin.' };
+  }
+
+  if (existingClinic.professionalsCount !== undefined && incomingClinic.professionalsCount !== existingClinic.professionalsCount) {
+    return { allowed: false, reason: 'Limites de profissionais contratados só podem ser alterados pelo SuperAdmin.' };
+  }
+
+  const allowedOwnerKeys = new Set(['name', 'tradeName', 'phone', 'email', 'address', 'updatedAt']);
+  for (const key of Object.keys(incomingClinic) as (keyof Clinic)[]) {
+    if (incomingClinic[key] !== existingClinic[key] && !allowedOwnerKeys.has(key)) {
+      return { allowed: false, reason: `Proprietário não pode alterar o campo administrativo ${key}.` };
+    }
+  }
+
+  return { allowed: true };
+}
+
+/**
+ * Validates professional private vs public directory access.
+ */
+export function validateProfessionalAccess(
+  prof: { userId: string },
+  collectionType: 'private' | 'public',
+  callerUid: string,
+  isSuperAdmin: boolean = false
+): boolean {
+  if (!callerUid) return false;
+  if (collectionType === 'public') {
+    // Public directory is readable by any signed in user
+    return true;
+  }
+  // Private record is accessible only by the professional themselves or superadmin
+  return prof.userId === callerUid || isSuperAdmin;
 }

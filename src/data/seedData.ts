@@ -539,9 +539,14 @@ export const SEED_AUDIT_LOGS: AuditLog[] = [
     userId: 'psy_marcos_01',
     userEmail: 'marcos.vinicius@psicologia.com.br',
     action: 'create_clinical_record',
+    eventCode: 'CLINICAL_RECORD_CREATED',
     targetCollection: 'clinical_records',
     targetId: 'rec_01',
-    details: 'Registro de evolução clínica da sessão #11 da paciente Juliana Prado.'
+    metadata: {
+      patientId: 'pat_01',
+      sessionNumber: 11
+    },
+    details: '[METADADOS] Registro de sessão #11 do paciente pat_01.'
   },
   {
     id: 'log_02',
@@ -549,8 +554,13 @@ export const SEED_AUDIT_LOGS: AuditLog[] = [
     userId: 'psy_marcos_01',
     userEmail: 'marcos.vinicius@psicologia.com.br',
     action: 'create_clinical_record',
+    eventCode: 'CLINICAL_RECORD_CREATED',
     targetCollection: 'clinical_records',
     targetId: 'rec_02',
-    details: 'Registro de evolução clínica da sessão #07 do paciente Thiago Ferreira.'
+    metadata: {
+      patientId: 'pat_02',
+      sessionNumber: 7
+    },
+    details: '[METADADOS] Registro de sessão #7 do paciente pat_02.'
   }
 ];

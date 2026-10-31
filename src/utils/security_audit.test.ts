@@ -9,10 +9,13 @@ import {
   validateNotificationCreate,
   validateNotificationUpdate,
   validateSubscriptionAccess,
-  validateClinicalRecordWrite
+  validateClinicalRecordWrite,
+  validateClinicalRecordDelete,
+  validateClinicUpdate,
+  validateProfessionalAccess
 } from './rules.ts';
 import { sanitizeAuditLog } from '../services/firestoreService.ts';
-import { Appointment, UserRole, AuditLog, UserProfile, Patient, ClinicalRecord, AppNotification } from '../types/index.ts';
+import { Appointment, UserRole, AuditLog, UserProfile, Patient, ClinicalRecord, AppNotification, Clinic, Professional } from '../types/index.ts';
 
 // -----------------------------------------------------------------------------
 // 1. USUÁRIO NÃO AUTENTICADO NÃO ACESSA MÓDULOS INTERNOS
@@ -805,5 +808,318 @@ test('AUDIT 27: Subscription access allows clinic manager who owns clinic, block
     'Unrelated user must be blocked from foreign clinic subscription'
   );
 });
+
+// -----------------------------------------------------------------------------
+// 28. ISOLAMENTO DE DADOS PRIVADOS DO DIRETÓRIO DE PROFISSIONAIS
+// -----------------------------------------------------------------------------
+test('AUDIT 28: Authenticated professional cannot list private contact/billing data of another professional', () => {
+  const profPrivateData = { userId: 'psy_marcos_123', email: 'privado@marcos.com', phone: '11999999999' };
+
+  // Other signed in psychologist tries to read Marcos's private document in /professionals
+  const accessDeniedToPeer = validateProfessionalAccess(profPrivateData, 'private', 'psy_other_user_456', false);
+  assert.equal(accessDeniedToPeer, false, 'Colleague must NOT have access to private professional document');
+
+  // Marcos has access to his own private document
+  const accessAllowedToOwner = validateProfessionalAccess(profPrivateData, 'private', 'psy_marcos_123', false);
+  assert.equal(accessAllowedToOwner, true, 'Psychologist must have access to own private record');
+
+  // Superadmin has controlled administrative access
+  const accessAllowedToAdmin = validateProfessionalAccess(profPrivateData, 'private', 'superadmin_uid', true);
+  assert.equal(accessAllowedToAdmin, true, 'Superadmin has administrative access to professional record');
+
+  // Public directory is open to authenticated users for booking
+  const publicAccess = validateProfessionalAccess(profPrivateData, 'public', 'patient_ana_111', false);
+  assert.equal(publicAccess, true, 'Public directory is open for booking');
+});
+
+// -----------------------------------------------------------------------------
+// 29. PSICÓLOGO NÃO PODE ALTERAR CAMPOS INDEVIDOS DE AGENDAMENTO OU SALTAR STATUS
+// -----------------------------------------------------------------------------
+test('AUDIT 29: Psychologist cannot alter immutable appointment fields (price, date, room) or perform invalid status jumps', () => {
+  const originalApp: Appointment = {
+    id: 'app_100',
+    psychologistId: 'psy_marcos_123',
+    patientId: 'pat_ana_1',
+    patientUserId: 'usr_ana_1',
+    patientName: 'Ana Souza',
+    clinicId: 'clinic_mente_viva',
+    roomId: 'room_1',
+    date: '2026-11-05',
+    startTime: '14:00',
+    endTime: '14:50',
+    durationMinutes: 50,
+    price: 180,
+    paymentStatus: 'pending',
+    status: 'pending',
+    requestedBy: 'patient',
+    createdAt: '2026-10-30T10:00:00Z',
+    updatedAt: '2026-10-30T10:00:00Z'
+  };
+
+  // Attempt 1: Psychologist tries to increase session price unilaterally
+  const priceTamper = validateAppointmentUpdate(
+    originalApp,
+    { ...originalApp, price: 350 },
+    'psy_marcos_123'
+  );
+  assert.equal(priceTamper.allowed, false);
+  assert.match(priceTamper.reason || '', /price/);
+
+  // Attempt 2: Psychologist tries to change room unilaterally via direct update
+  const roomTamper = validateAppointmentUpdate(
+    originalApp,
+    { ...originalApp, roomId: 'room_alien' },
+    'psy_marcos_123'
+  );
+  assert.equal(roomTamper.allowed, false);
+  assert.match(roomTamper.reason || '', /roomId/);
+
+  // Attempt 3: Psychologist tries to jump status from pending directly to completed without confirmation
+  const illegalJump = validateAppointmentUpdate(
+    originalApp,
+    { ...originalApp, status: 'completed' },
+    'psy_marcos_123'
+  );
+  assert.equal(illegalJump.allowed, false);
+  assert.match(illegalJump.reason || '', /Transição inválida/);
+
+  // Legitimate update: Confirm pending session and add professional notes
+  const legitConfirm = validateAppointmentUpdate(
+    originalApp,
+    { ...originalApp, status: 'confirmed', notes: 'Sessão confirmada no consultório 1.' },
+    'psy_marcos_123'
+  );
+  assert.equal(legitConfirm.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 30. PACIENTE NÃO PODE ALTERAR CAMPOS ADMINISTRATIVOS EM AGENDAMENTOS
+// -----------------------------------------------------------------------------
+test('AUDIT 30: Patient cannot set administrative statuses (confirmed, completed, no_show)', () => {
+  const confirmedApp: Appointment = {
+    id: 'app_200',
+    psychologistId: 'psy_marcos_123',
+    patientId: 'pat_ana_1',
+    patientUserId: 'usr_ana_1',
+    patientName: 'Ana Souza',
+    clinicId: 'clinic_mente_viva',
+    roomId: 'room_1',
+    date: '2026-11-05',
+    startTime: '14:00',
+    endTime: '14:50',
+    durationMinutes: 50,
+    price: 180,
+    paymentStatus: 'pending',
+    status: 'confirmed',
+    requestedBy: 'psychologist',
+    createdAt: '2026-10-30T10:00:00Z',
+    updatedAt: '2026-10-30T10:00:00Z'
+  };
+
+  // Patient tries to mark session as completed
+  const patientTryComplete = validateAppointmentUpdate(
+    confirmedApp,
+    { ...confirmedApp, status: 'completed' },
+    'usr_ana_1'
+  );
+  assert.equal(patientTryComplete.allowed, false);
+  assert.match(patientTryComplete.reason || '', /Paciente não tem autorização/);
+
+  // Patient tries to mark no_show
+  const patientTryNoShow = validateAppointmentUpdate(
+    confirmedApp,
+    { ...confirmedApp, status: 'no_show' },
+    'usr_ana_1'
+  );
+  assert.equal(patientTryNoShow.allowed, false);
+
+  // Legitimate action: Patient requests cancellation with reason
+  const patientCancelRequest = validateAppointmentUpdate(
+    confirmedApp,
+    { ...confirmedApp, status: 'cancellation_requested', cancellationReason: 'Imprevisto de trabalho.' },
+    'usr_ana_1'
+  );
+  assert.equal(patientCancelRequest.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 31. PSICÓLOGO NÃO PODE MODIFICAR IDENTIFICADORES OU METADADOS FIXOS DE PRONTUÁRIO
+// -----------------------------------------------------------------------------
+test('AUDIT 31: Psychologist cannot mutate core identifiers, patientId or session date on clinical records', () => {
+  const existingRecord: ClinicalRecord = {
+    id: 'rec_500',
+    psychologistId: 'psy_marcos_123',
+    patientId: 'pat_ana_1',
+    appointmentId: 'app_200',
+    sessionDate: '2026-11-05',
+    sessionNumber: 4,
+    evolutionNotes: 'Evolução clínica registrada.',
+    isConfidential: true,
+    createdAt: '2026-11-05T15:00:00Z',
+    updatedAt: '2026-11-05T15:00:00Z',
+    createdBy: 'Dr. Marcos'
+  };
+
+  // Attempt to alter sessionDate
+  const alterDate = validateClinicalRecordWrite(
+    { ...existingRecord, sessionDate: '2026-12-01' },
+    'psy_marcos_123',
+    'psy_marcos_123',
+    true,
+    existingRecord
+  );
+  assert.equal(alterDate.allowed, false);
+  assert.match(alterDate.reason || '', /sessionDate é imutável/);
+
+  // Attempt to reassign to another patient
+  const alterPatient = validateClinicalRecordWrite(
+    { ...existingRecord, patientId: 'pat_carlos_2' },
+    'psy_marcos_123',
+    'psy_marcos_123',
+    true,
+    existingRecord
+  );
+  assert.equal(alterPatient.allowed, false);
+  assert.match(alterPatient.reason || '', /patientId é imutável/);
+
+  // Legitimate update: Add clinical rectification notes
+  const legitRectification = validateClinicalRecordWrite(
+    { ...existingRecord, retificationNotes: 'Retificação efetuada: paciente relatou melhora progressiva.' },
+    'psy_marcos_123',
+    'psy_marcos_123',
+    true,
+    existingRecord
+  );
+  assert.equal(legitRectification.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 32. DEVER LEGAL DE RETENÇÃO: EXCLUSÃO DE PRONTUÁRIO É ESTRITAMENTE PROIBIDA
+// -----------------------------------------------------------------------------
+test('AUDIT 32: Deletion of clinical records is strictly prohibited by legal retention obligations (CFP 01/2009)', () => {
+  const recordToDelete = { psychologistId: 'psy_marcos_123' };
+
+  // Even the author psychologist cannot delete a clinical record
+  const psychologistDeleteAttempt = validateClinicalRecordDelete(recordToDelete, 'psy_marcos_123', false);
+  assert.equal(psychologistDeleteAttempt.allowed, false);
+  assert.match(psychologistDeleteAttempt.reason || '', /guarda obrigatória/);
+
+  // Superadmin cannot delete clinical records
+  const superAdminDeleteAttempt = validateClinicalRecordDelete(recordToDelete, 'superadmin_uid', true);
+  assert.equal(superAdminDeleteAttempt.allowed, false);
+  assert.match(superAdminDeleteAttempt.reason || '', /guarda obrigatória/);
+});
+
+// -----------------------------------------------------------------------------
+// 33. PROPRIETÁRIO NÃO PODE TRANSFERIR PROPRIEDADE OU ALTERAR LIMITES DA CLÍNICA DIRETAMENTE
+// -----------------------------------------------------------------------------
+test('AUDIT 33: Clinic owner cannot transfer ownership or mutate contracted limits via direct update', () => {
+  const existingClinic: Clinic = {
+    id: 'clinic_mente_viva',
+    name: 'Clínica Mente Viva',
+    ownerId: 'owner_carlos_1',
+    phone: '1133334444',
+    email: 'contato@menteviva.com.br',
+    address: 'Av Paulista, 1000',
+    status: 'active',
+    roomsCount: 4,
+    professionalsCount: 6,
+    cnpj: '12.345.678/0001-90',
+    createdAt: '2026-01-01T00:00:00Z'
+  };
+
+  // Attempt to transfer ownerId to an attacker UID
+  const tryTransferOwnership = validateClinicUpdate(
+    existingClinic,
+    { ...existingClinic, ownerId: 'attacker_uid' },
+    'owner_carlos_1',
+    false
+  );
+  assert.equal(tryTransferOwnership.allowed, false);
+  assert.match(tryTransferOwnership.reason || '', /Transferência de propriedade/);
+
+  // Attempt to bypass subscription limits by editing roomsCount directly
+  const tryBoostRooms = validateClinicUpdate(
+    existingClinic,
+    { ...existingClinic, roomsCount: 50 },
+    'owner_carlos_1',
+    false
+  );
+  assert.equal(tryBoostRooms.allowed, false);
+  assert.match(tryBoostRooms.reason || '', /Limites de salas/);
+
+  // Legitimate update: Update phone, email, and address
+  const legitClinicUpdate = validateClinicUpdate(
+    existingClinic,
+    { ...existingClinic, phone: '11988887777', address: 'Av Paulista, 1500, Conj 42' },
+    'owner_carlos_1',
+    false
+  );
+  assert.equal(legitClinicUpdate.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 34. LOGS DE AUDITORIA: METADADOS ESTRUTURADOS E EXPURGO TOTAL DE NARRATIVA CLÍNICA
+// -----------------------------------------------------------------------------
+test('AUDIT 34: Audit log sanitization purges freeform narrative text and creates deterministic metadata', () => {
+  const logWithSensitiveClinicalText: Partial<AuditLog> = {
+    id: 'log_test_narrative',
+    userId: 'psy_marcos_123',
+    userEmail: 'dr.marcos@test.com',
+    action: 'create_clinical_record',
+    eventCode: 'CLINICAL_RECORD_CREATED',
+    targetCollection: 'clinical_records',
+    targetId: 'rec_500',
+    details: 'Paciente relatou pensamentos suicidas e crise de ansiedade. Diagnóstico: F32.2 depressão grave. Senha=123456.',
+    metadata: {
+      patientId: 'pat_ana_1',
+      sessionNumber: 3
+    }
+  };
+
+  const sanitized = sanitizeAuditLog(logWithSensitiveClinicalText);
+
+  // Raw narrative clinical text must NOT be present in details!
+  assert.equal(sanitized.details.includes('suicidas'), false, 'Clinical symptoms must be completely purged');
+  assert.equal(sanitized.details.includes('F32.2'), false, 'Diagnostic hypotheses must be completely purged');
+  assert.equal(sanitized.details.includes('123456'), false, 'Passwords must be completely purged');
+
+  // Details must be deterministically formatted
+  assert.ok(sanitized.details.includes('[METADADOS]'), 'Must use structured deterministic prefix');
+  assert.ok(sanitized.details.includes('sessão #3'), 'Must contain structured session identifier');
+  assert.ok(sanitized.details.includes('pat_ana_1'), 'Must contain structured patient ID');
+});
+
+// -----------------------------------------------------------------------------
+// 35. CONTROLE ADMINISTRATIVO DE SUPERADMIN: UID É ESTRITAMENTE IMUTÁVEL
+// -----------------------------------------------------------------------------
+test('AUDIT 35: Controlled superadmin profile updates enforce immutable UID', () => {
+  const existingUser: Partial<UserProfile> = {
+    uid: 'user_regular_123',
+    email: 'user@test.com',
+    role: 'psychologist',
+    status: 'active'
+  };
+
+  // Superadmin tries to mutate user UID
+  const superadminTamperUid = validateUserProfileUpdate(
+    existingUser,
+    { ...existingUser, uid: 'tampered_uid_999' },
+    'superadmin_uid',
+    true // isCallerSuperAdmin = true
+  );
+  assert.equal(superadminTamperUid.allowed, false);
+  assert.match(superadminTamperUid.reason || '', /uid é estritamente imutável/);
+
+  // Superadmin legitimately suspends account or adjusts administrative role
+  const legitSuperadminUpdate = validateUserProfileUpdate(
+    existingUser,
+    { ...existingUser, status: 'suspended' },
+    'superadmin_uid',
+    true
+  );
+  assert.equal(legitSuperadminUpdate.allowed, true);
+});
+
 
 

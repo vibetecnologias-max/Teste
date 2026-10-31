@@ -6,8 +6,7 @@ import {
   setDoc,
   updateDoc,
   query,
-  where,
-  onSnapshot
+  where
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase/config';
 import {
@@ -17,7 +16,13 @@ import {
   PaymentRecord,
   ExpenseRecord,
   ClinicRoom,
+  Clinic,
+  Professional,
+  ProfessionalPublic,
   AuditLog,
+  AuditAction,
+  AuditEventCode,
+  AuditMetadata,
   AppNotification
 } from '../types';
 
@@ -27,6 +32,66 @@ import {
 export async function bootstrapFirestoreData(): Promise<void> {
   // Production-ready: does not inject mock patients or mock clinical records.
   // Real data must be created by authenticated users in their respective workspaces.
+}
+
+// PROFESSIONALS: PUBLIC DIRECTORY VS PRIVATE SENSITIVE RECORD
+/**
+ * Fetches public directory profiles for booking (contains NO private contact/billing data).
+ */
+export async function fetchPublicProfessionals(): Promise<ProfessionalPublic[]> {
+  try {
+    const snap = await getDocs(collection(db, 'professionals_public'));
+    if (snap.empty) return [];
+    return snap.docs.map(d => ({ ...d.data(), id: d.id } as ProfessionalPublic));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'professionals_public');
+    return [];
+  }
+}
+
+/**
+ * Fetches the private professional profile for the authenticated psychologist.
+ */
+export async function fetchProfessionalProfile(userId: string): Promise<Professional | null> {
+  try {
+    const q = query(collection(db, 'professionals'), where('userId', '==', userId));
+    const snap = await getDocs(q);
+    if (snap.empty) return null;
+    const docData = snap.docs[0];
+    return { ...docData.data(), id: docData.id } as Professional;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, `professionals/userId=${userId}`);
+    return null;
+  }
+}
+
+/**
+ * Persists a professional's private record and synchronizes its public directory projection.
+ */
+export async function persistProfessional(prof: Professional): Promise<void> {
+  try {
+    // 1. Save private sensitive profile (only accessible by psychologist themselves or superadmin)
+    await setDoc(doc(db, 'professionals', prof.id), prof);
+
+    // 2. Save public projection (safe for patient appointment booking)
+    const publicProfile: ProfessionalPublic = {
+      id: prof.id,
+      userId: prof.userId,
+      name: prof.name,
+      crp: prof.crp,
+      bio: prof.bio,
+      specialities: prof.specialities,
+      sessionDurationMinutes: prof.sessionDurationMinutes,
+      sessionPrice: prof.sessionPrice,
+      clinicIds: prof.clinicIds,
+      status: prof.status,
+      photoUrl: prof.photoUrl
+    };
+    await setDoc(doc(db, 'professionals_public', prof.id), publicProfile);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `professionals/${prof.id}`);
+    throw error;
+  }
 }
 
 // APPOINTMENTS
@@ -96,7 +161,7 @@ export async function persistPatient(patient: Patient): Promise<void> {
   }
 }
 
-// CLINICAL RECORDS (STRICT SIGILO PROFISSIONAL)
+// CLINICAL RECORDS (STRICT SIGILO PROFISSIONAL / CFP 01/2009 / RETENÇÃO OBRIGATÓRIA)
 export async function fetchClinicalRecordsForPatient(
   patientId: string,
   psychologistId: string
@@ -125,8 +190,32 @@ export async function persistClinicalRecord(record: ClinicalRecord): Promise<voi
   }
 }
 
-// AUDIT LOGS (IMMUTABLE, ALLOWLIST-VALIDATED & SANITIZED)
-const ALLOWED_AUDIT_ACTIONS = new Set<AuditLog['action']>([
+/**
+ * Retifies a clinical record preserving immutable patient and session links.
+ */
+export async function retifyClinicalRecord(
+  id: string,
+  updates: {
+    evolutionNotes?: string;
+    privateNotes?: string;
+    diagnosticHypothesis?: string;
+    conductPlan?: string;
+    retificationNotes: string;
+  }
+): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'clinical_records', id), {
+      ...updates,
+      updatedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `clinical_records/${id}`);
+    throw error;
+  }
+}
+
+// AUDIT LOGS (IMMUTABLE, ALLOWLIST-VALIDATED & DETERMINISTIC METADATA)
+const ALLOWED_AUDIT_ACTIONS = new Set<AuditAction>([
   'read_clinical_record',
   'create_clinical_record',
   'update_clinical_record',
@@ -134,55 +223,130 @@ const ALLOWED_AUDIT_ACTIONS = new Set<AuditLog['action']>([
   'role_change'
 ]);
 
-const ALLOWED_TARGET_COLLECTIONS = new Set<string>([
+const ALLOWED_EVENT_CODES = new Set<AuditEventCode>([
+  'CLINICAL_RECORD_VIEWED',
+  'CLINICAL_RECORD_CREATED',
+  'CLINICAL_RECORD_RECTIFIED',
+  'APPOINTMENT_CANCELLED',
+  'USER_ROLE_CHANGED'
+]);
+
+const ALLOWED_TARGET_COLLECTIONS = new Set<AuditLog['targetCollection']>([
   'clinical_records',
   'appointments',
   'users',
-  'patients',
-  'subscriptions',
-  'notifications'
+  'patients'
 ]);
 
 /**
- * Sanitizes audit logs using an explicit attribute allowlist and redacting
- * any passwords, credentials or clinical sensitive data.
+ * Sanitizes audit logs using an explicit attribute allowlist and structured metadata.
+ * Freeform clinical notes, symptoms, diagnostic narratives, and credentials are strictly excluded.
  */
-export function sanitizeAuditLog(log: AuditLog): AuditLog {
-  // 1. Strict Attribute Allowlist: Only permit known, non-sensitive audit fields
-  const safeAction: AuditLog['action'] = ALLOWED_AUDIT_ACTIONS.has(log.action)
-    ? log.action
-    : 'role_change';
+export function sanitizeAuditLog(log: Partial<AuditLog>): AuditLog {
+  const safeId = String(log.id || `log_${Date.now()}`).slice(0, 128);
+  const safeTimestamp = typeof log.timestamp === 'string' && !isNaN(Date.parse(log.timestamp))
+    ? log.timestamp
+    : new Date().toISOString();
+  const safeUserId = String(log.userId || '').slice(0, 128);
+  const safeUserEmail = String(log.userEmail || '').slice(0, 255);
 
-  const safeCollection = ALLOWED_TARGET_COLLECTIONS.has(log.targetCollection)
-    ? log.targetCollection
-    : 'general';
+  const safeAction: AuditAction = (log.action && ALLOWED_AUDIT_ACTIONS.has(log.action as AuditAction))
+    ? (log.action as AuditAction)
+    : 'read_clinical_record';
 
-  // 2. Sensitive content purge: passwords, clinical evolution notes, diagnostic hypotheses
-  let sanitizedDetails = typeof log.details === 'string' ? log.details : '';
-  const sensitivePatterns = [
-    /password[=:\s]+[^\s,]+/gi,
-    /evolutionNotes/gi,
-    /privateNotes/gi,
-    /diagnosticHypothesis/gi,
-    /conductPlan/gi
+  const safeEventCode: AuditEventCode = (log.eventCode && ALLOWED_EVENT_CODES.has(log.eventCode as AuditEventCode))
+    ? (log.eventCode as AuditEventCode)
+    : (safeAction === 'create_clinical_record' ? 'CLINICAL_RECORD_CREATED'
+      : safeAction === 'update_clinical_record' ? 'CLINICAL_RECORD_RECTIFIED'
+      : safeAction === 'cancel_appointment' ? 'APPOINTMENT_CANCELLED'
+      : safeAction === 'role_change' ? 'USER_ROLE_CHANGED'
+      : 'CLINICAL_RECORD_VIEWED');
+
+  const safeCollection: AuditLog['targetCollection'] = (log.targetCollection && ALLOWED_TARGET_COLLECTIONS.has(log.targetCollection as any))
+    ? (log.targetCollection as AuditLog['targetCollection'])
+    : 'clinical_records';
+
+  const safeTargetId = String(log.targetId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 128);
+
+  // Detect if unapproved freeform details contained sensitive clinical content or credentials
+  const sensitiveRegexes = [
+    /password[=:\s]*[^\s;,]+/gi,
+    /senha[=:\s]*[^\s;,]+/gi,
+    /evolutionnotes/gi,
+    /diagnostichypothesis/gi,
+    /conductplan/gi,
+    /suicid/gi,
+    /trauma/gi,
+    /F\d{2}(\.\d+)?/gi,
+    /secret/gi
   ];
 
-  for (const pattern of sensitivePatterns) {
-    sanitizedDetails = sanitizedDetails.replace(pattern, '[DADO_SENSIVEL_OMITIDO]');
+  let hadSensitiveContent = false;
+  if (typeof log.details === 'string' && log.details.trim().length > 0) {
+    hadSensitiveContent = sensitiveRegexes.some(rx => rx.test(log.details!));
   }
 
-  // 3. Return explicit allowlist object
+  // Strictly sanitized structured metadata (no narrative, symptoms, notes or passwords allowed)
+  const safeMetadata: AuditMetadata = {};
+  if (log.metadata && typeof log.metadata === 'object') {
+    if (typeof log.metadata.patientId === 'string') {
+      safeMetadata.patientId = log.metadata.patientId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+    }
+    if (typeof log.metadata.appointmentId === 'string') {
+      safeMetadata.appointmentId = log.metadata.appointmentId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+    }
+    if (typeof log.metadata.sessionNumber === 'number' && Number.isInteger(log.metadata.sessionNumber)) {
+      safeMetadata.sessionNumber = log.metadata.sessionNumber;
+    }
+    if (typeof log.metadata.reasonCode === 'string') {
+      safeMetadata.reasonCode = log.metadata.reasonCode.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
+    }
+    if (typeof log.metadata.previousStatus === 'string') {
+      safeMetadata.previousStatus = log.metadata.previousStatus.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 30);
+    }
+    if (typeof log.metadata.newStatus === 'string') {
+      safeMetadata.newStatus = log.metadata.newStatus.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 30);
+    }
+  }
+
+  // Deterministically generated details string (strictly non-arbitrary)
+  let deterministicDetails = '';
+  switch (safeEventCode) {
+    case 'CLINICAL_RECORD_VIEWED':
+      deterministicDetails = `[METADADOS] Acesso ao prontuário do paciente ${safeMetadata.patientId || safeTargetId}.`;
+      break;
+    case 'CLINICAL_RECORD_CREATED':
+      deterministicDetails = `[METADADOS] Registro de sessão #${safeMetadata.sessionNumber ?? 'N/A'} do paciente ${safeMetadata.patientId || safeTargetId}.`;
+      break;
+    case 'CLINICAL_RECORD_RECTIFIED':
+      deterministicDetails = `[METADADOS] Retificação em prontuário do paciente ${safeMetadata.patientId || safeTargetId}.`;
+      break;
+    case 'APPOINTMENT_CANCELLED':
+      deterministicDetails = `[METADADOS] Cancelamento de agendamento ${safeTargetId}. Motivo: ${safeMetadata.reasonCode || 'Geral'}.`;
+      break;
+    case 'USER_ROLE_CHANGED':
+      deterministicDetails = `[METADADOS] Atualização administrativa de papel do usuário ${safeTargetId}.`;
+      break;
+    default:
+      deterministicDetails = `[METADADOS] Evento ${safeAction} em ${safeCollection} ${safeTargetId}.`;
+      break;
+  }
+
+  if (hadSensitiveContent) {
+    deterministicDetails += ' [DADO_SENSIVEL_OMITIDO]';
+  }
+
   return {
-    id: String(log.id).slice(0, 128),
-    timestamp: typeof log.timestamp === 'string' && !isNaN(Date.parse(log.timestamp))
-      ? log.timestamp
-      : new Date().toISOString(),
-    userId: String(log.userId).slice(0, 128),
-    userEmail: String(log.userEmail).slice(0, 128),
+    id: safeId,
+    timestamp: safeTimestamp,
+    userId: safeUserId,
+    userEmail: safeUserEmail,
     action: safeAction,
+    eventCode: safeEventCode,
     targetCollection: safeCollection,
-    targetId: String(log.targetId).slice(0, 128),
-    details: sanitizedDetails.slice(0, 1000)
+    targetId: safeTargetId,
+    metadata: safeMetadata,
+    details: deterministicDetails.slice(0, 300)
   };
 }
 
@@ -200,8 +364,8 @@ export async function persistAuditLog(log: AuditLog): Promise<{ success: boolean
 }
 
 /**
- * Fetches audit logs without swallowing errors or masking permission failures.
- * Returns structured result with success indicator, logs, and explicit error message.
+ * Fetches and sanitizes audit logs without swallowing errors.
+ * All records returned are validated against the schema before presentation in UI.
  */
 export async function fetchAuditLogs(): Promise<{ success: boolean; logs: AuditLog[]; error?: string }> {
   try {
@@ -209,7 +373,7 @@ export async function fetchAuditLogs(): Promise<{ success: boolean; logs: AuditL
     if (snap.empty) {
       return { success: true, logs: [] };
     }
-    const logs = snap.docs.map(d => ({ ...d.data(), id: d.id } as AuditLog));
+    const logs = snap.docs.map(d => sanitizeAuditLog({ ...d.data(), id: d.id }));
     return { success: true, logs };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : 'Falha na comunicação com o Firestore ao consultar logs de auditoria.';
@@ -219,6 +383,19 @@ export async function fetchAuditLogs(): Promise<{ success: boolean; logs: AuditL
       logs: [],
       error: errorMsg
     };
+  }
+}
+
+// CLINICS
+export async function updateClinicInDb(id: string, updates: Partial<Clinic>): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'clinics', id), {
+      ...updates,
+      updatedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `clinics/${id}`);
+    throw error;
   }
 }
 
@@ -323,5 +500,3 @@ export async function updateNotificationInDb(id: string, updates: Partial<AppNot
     throw error;
   }
 }
-
-

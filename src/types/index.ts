@@ -14,6 +14,10 @@ export interface UserProfile {
   updatedAt: string;
 }
 
+/**
+ * Sensitive professional management entity (includes private contact & billing data).
+ * Accessible ONLY by the professional themselves or SuperAdmin.
+ */
 export interface Professional {
   id: string;
   userId: string;
@@ -21,6 +25,23 @@ export interface Professional {
   crp: string;
   email: string;
   phone: string;
+  bio: string;
+  specialities: string[];
+  sessionDurationMinutes: number;
+  sessionPrice: number;
+  clinicIds: string[];
+  status: 'active' | 'inactive';
+  photoUrl?: string;
+}
+
+/**
+ * Public directory entity for psychologists (non-sensitive, safe for patient booking).
+ */
+export interface ProfessionalPublic {
+  id: string;
+  userId: string;
+  name: string;
+  crp: string;
   bio: string;
   specialities: string[];
   sessionDurationMinutes: number;
@@ -43,6 +64,7 @@ export interface Clinic {
   roomsCount: number;
   professionalsCount: number;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface ClinicRoom {
@@ -118,6 +140,7 @@ export interface ClinicalRecord {
   privateNotes?: string;
   diagnosticHypothesis?: string;
   conductPlan?: string;
+  retificationNotes?: string;
   isConfidential: true;
   createdAt: string;
   updatedAt: string;
@@ -189,15 +212,40 @@ export interface AppNotification {
   createdAt: string;
 }
 
+export type AuditAction =
+  | 'read_clinical_record'
+  | 'create_clinical_record'
+  | 'update_clinical_record'
+  | 'cancel_appointment'
+  | 'role_change';
+
+export type AuditEventCode =
+  | 'CLINICAL_RECORD_VIEWED'
+  | 'CLINICAL_RECORD_CREATED'
+  | 'CLINICAL_RECORD_RECTIFIED'
+  | 'APPOINTMENT_CANCELLED'
+  | 'USER_ROLE_CHANGED';
+
+export interface AuditMetadata {
+  patientId?: string;
+  appointmentId?: string;
+  sessionNumber?: number;
+  reasonCode?: string;
+  previousStatus?: string;
+  newStatus?: string;
+}
+
 export interface AuditLog {
   id: string;
   timestamp: string;
   userId: string;
   userEmail: string;
-  action: 'read_clinical_record' | 'create_clinical_record' | 'update_clinical_record' | 'cancel_appointment' | 'role_change';
-  targetCollection: string;
+  action: AuditAction;
+  eventCode?: AuditEventCode;
+  targetCollection: 'clinical_records' | 'appointments' | 'users' | 'patients';
   targetId: string;
-  details: string;
+  metadata?: AuditMetadata;
+  details: string; // Deterministically formatted, strictly non-arbitrary
 }
 
 export interface WeeklyScheduleDay {

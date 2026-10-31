@@ -44,7 +44,9 @@ import {
   fetchNotificationsForUser,
   persistNotification,
   updateNotificationInDb,
-  fetchAuditLogs
+  fetchAuditLogs,
+  sanitizeAuditLog,
+  retifyClinicalRecord as retifyClinicalRecordInDb
 } from '../services/firestoreService';
 import { logoutUser, getOrCreateUserProfile } from '../services/authService';
 
@@ -94,6 +96,16 @@ interface AppContextType {
   updatePatient: (id: string, updates: Partial<Patient>) => Promise<{ success: boolean; error?: string }>;
   // Clinical records (Strict sigilo)
   addClinicalRecord: (record: Omit<ClinicalRecord, 'id' | 'createdAt' | 'updatedAt' | 'createdBy' | 'isConfidential'>) => Promise<{ success: boolean; error?: string; record?: ClinicalRecord }>;
+  retifyClinicalRecord: (
+    recordId: string,
+    updates: {
+      evolutionNotes?: string;
+      privateNotes?: string;
+      diagnosticHypothesis?: string;
+      conductPlan?: string;
+      retificationNotes: string;
+    }
+  ) => Promise<{ success: boolean; error?: string }>;
   getPatientClinicalRecords: (patientId: string) => ClinicalRecord[];
   // Finance
   addPayment: (payment: Omit<PaymentRecord, 'id' | 'createdAt'>) => Promise<{ success: boolean; error?: string; payment?: PaymentRecord }>;
@@ -630,17 +642,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       await persistClinicalRecord(newRecord);
       setClinicalRecords(prev => [newRecord, ...prev]);
 
-      // Record immutable audit log
-      const log: AuditLog = {
+      // Record immutable audit log with structured metadata
+      const log: AuditLog = sanitizeAuditLog({
         id: `log_${Date.now()}`,
         timestamp: new Date().toISOString(),
         userId: currentUser.uid,
         userEmail: currentUser.email,
         action: 'create_clinical_record',
+        eventCode: 'CLINICAL_RECORD_CREATED',
         targetCollection: 'clinical_records',
         targetId: newRecord.id,
-        details: `Registro de evolução clínica da sessão #${recordData.sessionNumber} do paciente ${recordData.patientId}`
-      };
+        metadata: {
+          patientId: recordData.patientId,
+          sessionNumber: recordData.sessionNumber
+        }
+      });
       setAuditLogs(prev => [log, ...prev]);
       persistAuditLog(log).catch(console.error);
 
@@ -648,6 +664,59 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     } catch (err: any) {
       console.error('Falha ao gravar prontuário no Firestore:', err);
       return { success: false, error: 'Erro ao gravar prontuário no Firestore. Registro não salvo.' };
+    }
+  };
+
+  const retifyClinicalRecord = async (
+    recordId: string,
+    updates: {
+      evolutionNotes?: string;
+      privateNotes?: string;
+      diagnosticHypothesis?: string;
+      conductPlan?: string;
+      retificationNotes: string;
+    }
+  ): Promise<{ success: boolean; error?: string }> => {
+    if (!currentUser || currentUser.role !== 'psychologist') {
+      return { success: false, error: 'Apenas o psicólogo titular responsável pode retificar anotações.' };
+    }
+    const target = clinicalRecords.find(r => r.id === recordId);
+    if (!target) return { success: false, error: 'Prontuário não encontrado.' };
+    if (target.psychologistId !== currentUser.uid) {
+      return { success: false, error: 'Acesso negado: o prontuário pertence a outro profissional.' };
+    }
+
+    const updatedRecord: ClinicalRecord = {
+      ...target,
+      ...updates,
+      updatedAt: new Date().toISOString()
+    };
+
+    try {
+      await retifyClinicalRecordInDb(recordId, updates);
+      setClinicalRecords(prev => prev.map(r => r.id === recordId ? updatedRecord : r));
+
+      const log: AuditLog = sanitizeAuditLog({
+        id: `log_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        userId: currentUser.uid,
+        userEmail: currentUser.email,
+        action: 'update_clinical_record',
+        eventCode: 'CLINICAL_RECORD_RECTIFIED',
+        targetCollection: 'clinical_records',
+        targetId: recordId,
+        metadata: {
+          patientId: target.patientId,
+          sessionNumber: target.sessionNumber
+        }
+      });
+      setAuditLogs(prev => [log, ...prev]);
+      persistAuditLog(log).catch(console.error);
+
+      return { success: true };
+    } catch (err: any) {
+      console.error('Falha ao retificar prontuário no Firestore:', err);
+      return { success: false, error: 'Erro ao registrar retificação no Firestore.' };
     }
   };
 
@@ -660,16 +729,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const records = clinicalRecords.filter(r => r.patientId === patientId && r.psychologistId === currentUser.uid);
     if (records.length > 0) {
-      const log: AuditLog = {
+      const log: AuditLog = sanitizeAuditLog({
         id: `log_${Date.now()}`,
         timestamp: new Date().toISOString(),
         userId: currentUser.uid,
         userEmail: currentUser.email,
         action: 'read_clinical_record',
+        eventCode: 'CLINICAL_RECORD_VIEWED',
         targetCollection: 'clinical_records',
         targetId: patientId,
-        details: `Consulta ao prontuário e evoluções clínicas do paciente ID ${patientId}.`
-      };
+        metadata: {
+          patientId
+        }
+      });
       setAuditLogs(prev => [log, ...prev]);
       persistAuditLog(log).catch(console.error);
     }
@@ -798,6 +870,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         addPatient,
         updatePatient,
         addClinicalRecord,
+        retifyClinicalRecord,
         getPatientClinicalRecords,
         addPayment,
         updatePaymentStatus,
