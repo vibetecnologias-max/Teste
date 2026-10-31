@@ -19,6 +19,8 @@ import {
   Clinic,
   Professional,
   ProfessionalPublic,
+  ProfessionalStatus,
+  VerificationDetails,
   ClinicalRectification,
   AvailabilityConfig,
   AuditLog,
@@ -47,7 +49,7 @@ export async function fetchPublicProfessionals(): Promise<ProfessionalPublic[]> 
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as ProfessionalPublic));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'professionals_public');
-    return [];
+    throw error;
   }
 }
 
@@ -63,7 +65,7 @@ export async function fetchProfessionalProfile(userId: string): Promise<Professi
     return { ...docData.data(), id: docData.id } as Professional;
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, `professionals/userId=${userId}`);
-    return null;
+    throw error;
   }
 }
 
@@ -87,11 +89,63 @@ export async function persistProfessional(prof: Professional): Promise<void> {
       sessionPrice: prof.sessionPrice,
       clinicIds: prof.clinicIds,
       status: prof.status,
+      verificationDetails: prof.verificationDetails,
       photoUrl: prof.photoUrl
     };
     await setDoc(doc(db, 'professionals_public', prof.id), publicProfile);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `professionals/${prof.id}`);
+    throw error;
+  }
+}
+
+/**
+ * SuperAdmin administrative validation of psychologist CRP registration.
+ * Updates both private and public projections and records an immutable audit log.
+ */
+export async function updateProfessionalVerificationStatus(
+  profId: string,
+  newStatus: ProfessionalStatus,
+  justification: string,
+  adminUser: { uid: string; email: string }
+): Promise<void> {
+  const verificationDetails: VerificationDetails = {
+    verifiedAt: new Date().toISOString(),
+    verifiedBy: adminUser.uid,
+    notes: justification
+  };
+
+  try {
+    await updateDoc(doc(db, 'professionals', profId), {
+      status: newStatus,
+      verificationDetails,
+      updatedAt: new Date().toISOString()
+    });
+
+    await updateDoc(doc(db, 'professionals_public', profId), {
+      status: newStatus,
+      verificationDetails,
+      updatedAt: new Date().toISOString()
+    });
+
+    const auditLog = sanitizeAuditLog({
+      id: `log_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      userId: adminUser.uid,
+      userEmail: adminUser.email,
+      action: newStatus === 'active' ? 'approve_professional' : 'reject_professional',
+      eventCode: newStatus === 'active' ? 'PROFESSIONAL_VERIFIED' : 'PROFESSIONAL_REJECTED',
+      targetCollection: 'professionals_public',
+      targetId: profId,
+      metadata: {
+        professionalId: profId,
+        newStatus,
+        justification: justification.slice(0, 100)
+      }
+    });
+    await persistAuditLog(auditLog);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `professionals/${profId}`);
     throw error;
   }
 }
@@ -116,7 +170,7 @@ export async function fetchAppointmentsForUser(
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as Appointment));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'appointments');
-    return [];
+    throw error;
   }
 }
 
@@ -150,7 +204,7 @@ export async function fetchPatientsForPsychologist(psychologistId: string): Prom
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as Patient));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'patients');
-    return [];
+    throw error;
   }
 }
 
@@ -216,7 +270,7 @@ export async function fetchClinicalRecordsForPatient(
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as ClinicalRecord));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'clinical_records');
-    return [];
+    throw error;
   }
 }
 
@@ -292,7 +346,7 @@ export async function fetchClinicsForUser(userId: string, role: string): Promise
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as Clinic));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'clinics');
-    return [];
+    throw error;
   }
 }
 
@@ -303,7 +357,7 @@ export async function fetchAvailabilityForPsychologist(psychologistId: string): 
     return snap.data() as AvailabilityConfig;
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, `availability_configs/${psychologistId}`);
-    return null;
+    throw error;
   }
 }
 
@@ -322,7 +376,9 @@ const ALLOWED_AUDIT_ACTIONS = new Set<AuditAction>([
   'create_clinical_record',
   'update_clinical_record',
   'cancel_appointment',
-  'role_change'
+  'role_change',
+  'approve_professional',
+  'reject_professional'
 ]);
 
 const ALLOWED_EVENT_CODES = new Set<AuditEventCode>([
@@ -330,14 +386,18 @@ const ALLOWED_EVENT_CODES = new Set<AuditEventCode>([
   'CLINICAL_RECORD_CREATED',
   'CLINICAL_RECORD_RECTIFIED',
   'APPOINTMENT_CANCELLED',
-  'USER_ROLE_CHANGED'
+  'USER_ROLE_CHANGED',
+  'PROFESSIONAL_VERIFIED',
+  'PROFESSIONAL_REJECTED'
 ]);
 
 const ALLOWED_TARGET_COLLECTIONS = new Set<AuditLog['targetCollection']>([
   'clinical_records',
   'appointments',
   'users',
-  'patients'
+  'patients',
+  'professionals_public',
+  'professionals'
 ]);
 
 /**
@@ -362,6 +422,8 @@ export function sanitizeAuditLog(log: Partial<AuditLog>): AuditLog {
       : safeAction === 'update_clinical_record' ? 'CLINICAL_RECORD_RECTIFIED'
       : safeAction === 'cancel_appointment' ? 'APPOINTMENT_CANCELLED'
       : safeAction === 'role_change' ? 'USER_ROLE_CHANGED'
+      : safeAction === 'approve_professional' ? 'PROFESSIONAL_VERIFIED'
+      : safeAction === 'reject_professional' ? 'PROFESSIONAL_REJECTED'
       : 'CLINICAL_RECORD_VIEWED');
 
   const safeCollection: AuditLog['targetCollection'] = (log.targetCollection && ALLOWED_TARGET_COLLECTIONS.has(log.targetCollection as any))
@@ -394,6 +456,9 @@ export function sanitizeAuditLog(log: Partial<AuditLog>): AuditLog {
     if (typeof log.metadata.patientId === 'string') {
       safeMetadata.patientId = log.metadata.patientId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
     }
+    if (typeof log.metadata.professionalId === 'string') {
+      safeMetadata.professionalId = log.metadata.professionalId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+    }
     if (typeof log.metadata.appointmentId === 'string') {
       safeMetadata.appointmentId = log.metadata.appointmentId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
     }
@@ -408,6 +473,9 @@ export function sanitizeAuditLog(log: Partial<AuditLog>): AuditLog {
     }
     if (typeof log.metadata.newStatus === 'string') {
       safeMetadata.newStatus = log.metadata.newStatus.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 30);
+    }
+    if (typeof log.metadata.justification === 'string') {
+      safeMetadata.justification = log.metadata.justification.replace(/[^a-zA-Z0-9_\s.,-]/g, '').slice(0, 100);
     }
   }
 
@@ -428,6 +496,12 @@ export function sanitizeAuditLog(log: Partial<AuditLog>): AuditLog {
       break;
     case 'USER_ROLE_CHANGED':
       deterministicDetails = `[METADADOS] Atualização administrativa de papel do usuário ${safeTargetId}.`;
+      break;
+    case 'PROFESSIONAL_VERIFIED':
+      deterministicDetails = `[METADADOS] Homologação de cadastro profissional para ${safeMetadata.professionalId || safeTargetId}.`;
+      break;
+    case 'PROFESSIONAL_REJECTED':
+      deterministicDetails = `[METADADOS] Recusa de homologação de cadastro profissional para ${safeMetadata.professionalId || safeTargetId}.`;
       break;
     default:
       deterministicDetails = `[METADADOS] Evento ${safeAction} em ${safeCollection} ${safeTargetId}.`;
@@ -510,7 +584,7 @@ export async function fetchPayments(psychologistId: string): Promise<PaymentReco
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as PaymentRecord));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'payments');
-    return [];
+    throw error;
   }
 }
 
@@ -532,7 +606,7 @@ export async function fetchExpenses(psychologistId: string): Promise<ExpenseReco
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as ExpenseRecord));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'expenses');
-    return [];
+    throw error;
   }
 }
 
@@ -559,7 +633,7 @@ export async function fetchRooms(clinicId?: string): Promise<ClinicRoom[]> {
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as ClinicRoom));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'clinic_rooms');
-    return [];
+    throw error;
   }
 }
 
@@ -581,7 +655,7 @@ export async function fetchNotificationsForUser(userId: string): Promise<AppNoti
     return snap.docs.map(d => ({ ...d.data(), id: d.id } as AppNotification));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'notifications');
-    return [];
+    throw error;
   }
 }
 

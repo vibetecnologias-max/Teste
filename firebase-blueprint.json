@@ -32,7 +32,7 @@
         "bio": { "type": "string", "maxLength": 1000 },
         "sessionDurationMinutes": { "type": "number" },
         "sessionPrice": { "type": "number" },
-        "status": { "type": "string", "enum": ["active", "inactive"] }
+        "status": { "type": "string", "enum": ["pending_verification", "active", "suspended", "rejected", "inactive"] }
       },
       "required": ["id", "userId", "name", "crp"]
     },
@@ -48,7 +48,7 @@
         "bio": { "type": "string", "maxLength": 1000 },
         "sessionDurationMinutes": { "type": "number" },
         "sessionPrice": { "type": "number" },
-        "status": { "type": "string", "enum": ["active", "inactive"] }
+        "status": { "type": "string", "enum": ["pending_verification", "active", "suspended", "rejected", "inactive"] }
       },
       "required": ["id", "userId", "name", "crp"]
     },
@@ -235,14 +235,27 @@
         "id": { "type": "string", "maxLength": 128 },
         "userId": { "type": "string", "maxLength": 128 },
         "userEmail": { "type": "string", "maxLength": 255 },
-        "action": { "type": "string", "enum": ["read_clinical_record", "create_clinical_record", "update_clinical_record", "cancel_appointment", "role_change"] },
-        "eventCode": { "type": "string", "enum": ["CLINICAL_RECORD_VIEWED", "CLINICAL_RECORD_CREATED", "CLINICAL_RECORD_RECTIFIED", "APPOINTMENT_CANCELLED", "USER_ROLE_CHANGED"] },
-        "targetCollection": { "type": "string", "enum": ["clinical_records", "appointments", "users", "patients"] },
+        "action": { "type": "string", "enum": ["read_clinical_record", "create_clinical_record", "update_clinical_record", "cancel_appointment", "role_change", "approve_professional", "reject_professional"] },
+        "eventCode": { "type": "string", "enum": ["CLINICAL_RECORD_VIEWED", "CLINICAL_RECORD_CREATED", "CLINICAL_RECORD_RECTIFIED", "APPOINTMENT_CANCELLED", "USER_ROLE_CHANGED", "PROFESSIONAL_VERIFIED", "PROFESSIONAL_REJECTED"] },
+        "targetCollection": { "type": "string", "enum": ["clinical_records", "appointments", "users", "patients", "professionals_public", "professionals"] },
         "targetId": { "type": "string", "maxLength": 128 },
         "details": { "type": "string", "maxLength": 300 },
         "timestamp": { "type": "string" }
       },
       "required": ["id", "userId", "action", "eventCode", "targetCollection", "targetId", "details", "timestamp"]
+    },
+    "AvailabilityConfig": {
+      "title": "AvailabilityConfig",
+      "description": "Weekly working schedule and consultation slot parameters for a psychologist.",
+      "type": "object",
+      "properties": {
+        "psychologistId": { "type": "string", "maxLength": 128 },
+        "slotDurationMinutes": { "type": "number" },
+        "bufferMinutes": { "type": "number" },
+        "weeklySchedule": { "type": "array" },
+        "blockedDates": { "type": "array" }
+      },
+      "required": ["psychologistId", "weeklySchedule", "slotDurationMinutes", "bufferMinutes"]
     }
   },
   "firestore": {
@@ -273,6 +286,10 @@
     "/clinical_records/{recordId}/retifications/{retificationId}": {
       "schema": "ClinicalRectification",
       "description": "Chronological audited rectification adendums for psychotherapy records (CFP 01/2009 Art. 12)."
+    },
+    "/availability_configs/{psychologistId}": {
+      "schema": "AvailabilityConfig",
+      "description": "Psychologist weekly working schedule and appointment booking availability."
     },
     "/payments/{paymentId}": {
       "schema": "Payment",

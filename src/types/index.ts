@@ -14,6 +14,15 @@ export interface UserProfile {
   updatedAt: string;
 }
 
+export type ProfessionalStatus = 'pending_verification' | 'active' | 'suspended' | 'rejected' | 'inactive';
+
+export interface VerificationDetails {
+  verifiedAt?: string;
+  verifiedBy?: string;
+  notes?: string;
+  rejectionReason?: string;
+}
+
 /**
  * Sensitive professional management entity (includes private contact & billing data).
  * Accessible ONLY by the professional themselves or SuperAdmin.
@@ -30,7 +39,8 @@ export interface Professional {
   sessionDurationMinutes: number;
   sessionPrice: number;
   clinicIds: string[];
-  status: 'active' | 'inactive';
+  status: ProfessionalStatus;
+  verificationDetails?: VerificationDetails;
   photoUrl?: string;
 }
 
@@ -47,7 +57,8 @@ export interface ProfessionalPublic {
   sessionDurationMinutes: number;
   sessionPrice: number;
   clinicIds: string[];
-  status: 'active' | 'inactive';
+  status: ProfessionalStatus;
+  verificationDetails?: VerificationDetails;
   photoUrl?: string;
 }
 
@@ -230,22 +241,28 @@ export type AuditAction =
   | 'create_clinical_record'
   | 'update_clinical_record'
   | 'cancel_appointment'
-  | 'role_change';
+  | 'role_change'
+  | 'approve_professional'
+  | 'reject_professional';
 
 export type AuditEventCode =
   | 'CLINICAL_RECORD_VIEWED'
   | 'CLINICAL_RECORD_CREATED'
   | 'CLINICAL_RECORD_RECTIFIED'
   | 'APPOINTMENT_CANCELLED'
-  | 'USER_ROLE_CHANGED';
+  | 'USER_ROLE_CHANGED'
+  | 'PROFESSIONAL_VERIFIED'
+  | 'PROFESSIONAL_REJECTED';
 
 export interface AuditMetadata {
   patientId?: string;
   appointmentId?: string;
+  professionalId?: string;
   sessionNumber?: number;
   reasonCode?: string;
   previousStatus?: string;
   newStatus?: string;
+  justification?: string;
 }
 
 export interface AuditLog {

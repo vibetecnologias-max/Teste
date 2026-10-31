@@ -76,21 +76,24 @@ export async function registerWithEmail(
     await setDoc(doc(db, 'users', uid), newProfile);
     createdPaths.push(`users/${uid}`);
 
-    // 2. If psychologist, provision private record AND public projection
+    // 2. If psychologist, provision private record AND public projection with pending_verification
     if (role === 'psychologist' && profId) {
       const privateProf: Professional = {
         id: profId,
         userId: uid,
         name: displayName,
-        crp: extra?.crp || 'CRP Em Homologação',
+        crp: extra?.crp?.trim() || 'Pendente de comprovação',
         email,
         phone: extra?.phone || '',
-        bio: 'Profissional da psicologia cadastrado na plataforma Projeto Psi.',
-        specialities: ['Psicologia Clínica', 'Terapia Individual'],
+        bio: 'Perfil profissional em fase de cadastro e validação documental.',
+        specialities: ['Psicologia Geral'],
         sessionDurationMinutes: 50,
         sessionPrice: 180,
         clinicIds: [],
-        status: 'active'
+        status: 'pending_verification',
+        verificationDetails: {
+          notes: 'Registro informado pelo profissional no auto-cadastro. Aguardando conferência documental e homologação.'
+        }
       };
       await setDoc(doc(db, 'professionals', profId), privateProf);
       createdPaths.push(`professionals/${profId}`);
@@ -99,13 +102,16 @@ export async function registerWithEmail(
         id: profId,
         userId: uid,
         name: displayName,
-        crp: extra?.crp || 'CRP Em Homologação',
-        bio: 'Profissional da psicologia cadastrado na plataforma Projeto Psi.',
-        specialities: ['Psicologia Clínica', 'Terapia Individual'],
+        crp: extra?.crp?.trim() || 'Pendente de comprovação',
+        bio: 'Perfil profissional em fase de cadastro e validação documental.',
+        specialities: ['Psicologia Geral'],
         sessionDurationMinutes: 50,
         sessionPrice: 180,
         clinicIds: [],
-        status: 'active'
+        status: 'pending_verification',
+        verificationDetails: {
+          notes: 'Registro informado pelo profissional no auto-cadastro. Aguardando conferência documental e homologação.'
+        }
       };
       await setDoc(doc(db, 'professionals_public', profId), publicProf);
       createdPaths.push(`professionals_public/${profId}`);
