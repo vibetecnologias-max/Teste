@@ -4,23 +4,20 @@ import { auth, testConnection } from '../firebase/config';
 import {
   UserProfile,
   Professional,
+  ProfessionalPublic,
   Clinic,
   ClinicRoom,
   Patient,
   Appointment,
   AppointmentStatus,
   ClinicalRecord,
+  ClinicalRectification,
   PaymentRecord,
   ExpenseRecord,
   AppNotification,
   AuditLog,
   AvailabilityConfig
 } from '../types';
-import {
-  SEED_PROFESSIONALS,
-  SEED_CLINICS,
-  SEED_AVAILABILITY
-} from '../data/seedData';
 import {
   checkSlotConflict,
   isValidAppointmentTransition,
@@ -31,12 +28,13 @@ import {
   persistAppointment,
   persistPatient,
   persistClinicalRecord,
+  addClinicalRecordRectification,
   persistAuditLog,
   persistPayment,
   persistExpense,
   fetchAppointmentsForUser,
   fetchPatientsForPsychologist,
-  fetchClinicalRecordsForPatient,
+  fetchClinicalRecordsForPsychologist,
   fetchPayments,
   fetchExpenses,
   fetchRooms,
@@ -46,7 +44,11 @@ import {
   updateNotificationInDb,
   fetchAuditLogs,
   sanitizeAuditLog,
-  retifyClinicalRecord as retifyClinicalRecordInDb
+  fetchPublicProfessionals,
+  fetchProfessionalProfile,
+  fetchClinicsForUser,
+  fetchAvailabilityForPsychologist,
+  persistAvailability
 } from '../services/firestoreService';
 import { logoutUser, getOrCreateUserProfile } from '../services/authService';
 
@@ -54,9 +56,9 @@ interface AppContextType {
   currentUser: UserProfile | null;
   authLoading: boolean;
   persistenceError: string | null;
-  currentProfessional?: Professional;
-  currentClinic?: Clinic;
-  allProfessionals: Professional[];
+  currentProfessional?: Professional | null;
+  currentClinic?: Clinic | null;
+  allProfessionals: ProfessionalPublic[];
   clinics: Clinic[];
   rooms: ClinicRoom[];
   patients: Patient[];
@@ -66,12 +68,13 @@ interface AppContextType {
   expenses: ExpenseRecord[];
   notifications: AppNotification[];
   auditLogs: AuditLog[];
-  availability: AvailabilityConfig;
+  availability: AvailabilityConfig | null;
   isAuthenticated: boolean;
   loginUser: (user: UserProfile) => void;
   logout: () => Promise<void>;
   clearPersistenceError: () => void;
   refreshAuditLogs: () => Promise<void>;
+  updateAvailability: (config: AvailabilityConfig) => Promise<{ success: boolean; error?: string }>;
   // Appointment actions
   requestAppointment: (data: {
     psychologistId: string;
@@ -94,17 +97,11 @@ interface AppContextType {
   // Patient actions
   addPatient: (patient: Omit<Patient, 'id' | 'createdAt'>) => Promise<{ success: boolean; error?: string; patient?: Patient }>;
   updatePatient: (id: string, updates: Partial<Patient>) => Promise<{ success: boolean; error?: string }>;
-  // Clinical records (Strict sigilo)
-  addClinicalRecord: (record: Omit<ClinicalRecord, 'id' | 'createdAt' | 'updatedAt' | 'createdBy' | 'isConfidential'>) => Promise<{ success: boolean; error?: string; record?: ClinicalRecord }>;
+  // Clinical records (Strict sigilo & real subcollection rectifications)
+  addClinicalRecord: (record: Omit<ClinicalRecord, 'id' | 'createdAt' | 'updatedAt' | 'createdBy' | 'isConfidential' | 'retifications'>) => Promise<{ success: boolean; error?: string; record?: ClinicalRecord }>;
   retifyClinicalRecord: (
     recordId: string,
-    updates: {
-      evolutionNotes?: string;
-      privateNotes?: string;
-      diagnosticHypothesis?: string;
-      conductPlan?: string;
-      retificationNotes: string;
-    }
+    data: { reason: string; content: string } | { retificationNotes: string }
   ) => Promise<{ success: boolean; error?: string }>;
   getPatientClinicalRecords: (patientId: string) => ClinicalRecord[];
   // Finance
@@ -123,12 +120,16 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  // REQUIREMENT 2: Initial user MUST be null, established strictly via onAuthStateChanged
+  // Initial user MUST be null, established strictly via onAuthStateChanged
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(true);
   const [persistenceError, setPersistenceError] = useState<string | null>(null);
 
-  // REQUIREMENT 5: Real state initialized empty - never disguised with seed/mock data
+  // REAL PRODUCTION STATE: Initialized strictly empty without seed fallback disguises
+  const [allProfessionals, setAllProfessionals] = useState<ProfessionalPublic[]>([]);
+  const [currentProfessional, setCurrentProfessional] = useState<Professional | null>(null);
+  const [clinics, setClinics] = useState<Clinic[]>([]);
+  const [availability, setAvailability] = useState<AvailabilityConfig | null>(null);
   const [patients, setPatients] = useState<Patient[]>([]);
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [clinicalRecords, setClinicalRecords] = useState<ClinicalRecord[]>([]);
@@ -151,12 +152,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         } catch (err: any) {
           console.error('Erro ao verificar sessão do usuário:', err);
           setCurrentUser(null);
-          setPersistenceError('Falha ao autenticar ou carregar perfil no Firestore.');
+          setPersistenceError(err.message || 'Falha ao autenticar ou carregar perfil no Firestore.');
         } finally {
           setAuthLoading(false);
         }
       } else {
         setCurrentUser(null);
+        setCurrentProfessional(null);
+        setAllProfessionals([]);
+        setClinics([]);
+        setAvailability(null);
         setPatients([]);
         setAppointments([]);
         setClinicalRecords([]);
@@ -179,31 +184,56 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     let isMounted = true;
     const syncUserData = async () => {
       try {
-        const [userApps, userRooms, userNotifs] = await Promise.all([
+        // 1. General data for all authenticated users
+        const [publicProfs, userApps, userRooms, userNotifs, userClinics] = await Promise.all([
+          fetchPublicProfessionals(),
           fetchAppointmentsForUser(currentUser.uid, currentUser.role),
           fetchRooms(currentUser.clinicId),
-          fetchNotificationsForUser(currentUser.uid)
+          fetchNotificationsForUser(currentUser.uid),
+          fetchClinicsForUser(currentUser.uid, currentUser.role)
         ]);
 
         if (isMounted) {
+          setAllProfessionals(publicProfs);
           setAppointments(userApps);
           setRooms(userRooms);
           setNotifications(userNotifs);
+          setClinics(userClinics);
         }
 
+        // 2. Data specific to psychologists (patients, payments, expenses, private profile, availability, real clinical records)
         if (currentUser.role === 'psychologist') {
-          const [userPats, userPays, userExps] = await Promise.all([
+          const [userPats, userPays, userExps, privProf, userAvail] = await Promise.all([
             fetchPatientsForPsychologist(currentUser.uid),
             fetchPayments(currentUser.uid),
-            fetchExpenses(currentUser.uid)
+            fetchExpenses(currentUser.uid),
+            fetchProfessionalProfile(currentUser.uid),
+            fetchAvailabilityForPsychologist(currentUser.uid)
           ]);
+
           if (isMounted) {
             setPatients(userPats);
             setPayments(userPays);
             setExpenses(userExps);
+            setCurrentProfessional(privProf);
+            setAvailability(userAvail);
+          }
+
+          // Fetch real clinical records eagerly loading subcollection retifications
+          try {
+            const records = await fetchClinicalRecordsForPsychologist(currentUser.uid);
+            if (isMounted) {
+              setClinicalRecords(records);
+            }
+          } catch (recErr: any) {
+            console.error('Falha na recuperação dos prontuários clínicos:', recErr);
+            if (isMounted) {
+              setPersistenceError(`Erro ao carregar prontuários clínicos: ${recErr.message || 'Falha de leitura'}`);
+            }
           }
         }
 
+        // 3. Superadmin real audit logs
         if (currentUser.role === 'superadmin') {
           const auditRes = await fetchAuditLogs();
           if (isMounted) {
@@ -237,8 +267,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       } else {
         setPersistenceError(`Aviso de Auditoria: ${auditRes.error || 'Falha ao recarregar trilha de auditoria.'}`);
       }
-    } catch (err: any) {
+    } catch {
       setPersistenceError('Erro de conexão ao carregar registros de auditoria.');
+    }
+  };
+
+  const updateAvailability = async (config: AvailabilityConfig): Promise<{ success: boolean; error?: string }> => {
+    if (!currentUser || currentUser.role !== 'psychologist') {
+      return { success: false, error: 'Apenas psicólogos podem definir disponibilidade de agenda.' };
+    }
+    try {
+      await persistAvailability(config);
+      setAvailability(config);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Falha ao persistir horários de disponibilidade no Firestore.' };
     }
   };
 
@@ -250,6 +293,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const logout = async () => {
     await logoutUser();
     setCurrentUser(null);
+    setCurrentProfessional(null);
+    setAllProfessionals([]);
+    setClinics([]);
+    setAvailability(null);
     setPatients([]);
     setAppointments([]);
     setClinicalRecords([]);
@@ -264,13 +311,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setPersistenceError(null);
   };
 
-  const currentProfessional = currentUser
-    ? SEED_PROFESSIONALS.find(p => p.userId === currentUser.uid)
-    : undefined;
-
   const currentClinic = currentUser
-    ? SEED_CLINICS.find(c => c.id === currentUser.clinicId || c.ownerId === currentUser.uid)
-    : undefined;
+    ? (clinics.find(c => c.id === currentUser.clinicId || c.ownerId === currentUser.uid) || null)
+    : null;
 
   const unreadCount = currentUser
     ? notifications.filter(n => n.recipientUserId === currentUser.uid && !n.read).length
@@ -319,75 +362,57 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return { success: false, error: conflict.reason };
     }
 
-    const newApp: Appointment = {
+    const newAppointment: Appointment = {
       id: `app_${Date.now()}`,
       psychologistId: data.psychologistId,
       patientId: data.patientId,
-      patientUserId: currentUser.role === 'patient' ? currentUser.uid : undefined,
       patientName: data.patientName,
-      patientPhone: data.patientPhone || '',
+      patientUserId: currentUser.uid,
+      patientPhone: data.patientPhone,
       date: data.date,
       startTime: data.startTime,
       endTime: data.endTime,
       durationMinutes: data.durationMinutes,
-      status: 'pending',
       price: data.price,
+      status: 'pending',
       paymentStatus: 'pending',
-      roomId: data.roomId,
+      requestedBy: 'patient',
       notes: data.notes,
-      requestedBy: currentUser.role === 'patient' ? 'patient' : 'psychologist',
+      roomId: data.roomId,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
 
-
     try {
-      // REQUIREMENT 5: Persist in Firestore first before confirming success
-      await persistAppointment(newApp);
-      setAppointments(prev => [newApp, ...prev]);
+      await persistAppointment(newAppointment);
+      setAppointments(prev => [newAppointment, ...prev]);
 
-      const newNotif: AppNotification = {
+      const notif: AppNotification = {
         id: `notif_${Date.now()}`,
         recipientUserId: data.psychologistId,
         senderId: currentUser.uid,
         type: 'appointment_request',
-        title: 'Nova solicitação de agendamento',
-        message: `${data.patientName} solicitou atendimento para ${data.date.split('-').reverse().join('/')} às ${data.startTime}.`,
-        link: '/agenda',
+        title: 'Nova Solicitação de Agendamento',
+        message: `${data.patientName} solicitou uma consulta para o dia ${data.date} às ${data.startTime}.`,
         read: false,
         createdAt: new Date().toISOString()
       };
-      setNotifications(prev => [newNotif, ...prev]);
-      persistNotification(newNotif).catch(console.error);
+      persistNotification(notif).catch(console.error);
 
-      return { success: true, appointment: newApp };
+      return { success: true, appointment: newAppointment };
     } catch (err: any) {
       console.error('Falha ao persistir agendamento no Firestore:', err);
-      return { success: false, error: 'Falha na comunicação com o banco de dados Firestore. O agendamento não foi gravado.' };
+      return { success: false, error: 'Erro ao registrar solicitação no Firestore.' };
     }
   };
 
   const confirmAppointment = async (appointmentId: string): Promise<{ success: boolean; error?: string }> => {
     if (!currentUser) return { success: false, error: 'Usuário não autenticado.' };
-
     const target = appointments.find(a => a.id === appointmentId);
     if (!target) return { success: false, error: 'Agendamento não encontrado.' };
 
     if (!isValidAppointmentTransition(target.status, 'confirmed')) {
-      return { success: false, error: `Transição inválida de ${target.status} para confirmado.` };
-    }
-
-    const conflict = checkSlotConflict(appointments, {
-      id: target.id,
-      psychologistId: target.psychologistId,
-      date: target.date,
-      startTime: target.startTime,
-      endTime: target.endTime,
-      roomId: target.roomId
-    }, 10);
-
-    if (conflict.hasConflict) {
-      return { success: false, error: conflict.reason };
+      return { success: false, error: 'Transição para status confirmado inválida para este agendamento.' };
     }
 
     const updated: Appointment = {
@@ -406,37 +431,34 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           recipientUserId: target.patientUserId,
           senderId: currentUser.uid,
           type: 'appointment_confirmed',
-          title: 'Consulta Confirmada!',
-          message: `Seu agendamento para ${target.date.split('-').reverse().join('/')} às ${target.startTime} foi confirmado pelo psicólogo.`,
-          link: '/meus-agendamentos',
+          title: 'Sua Consulta Foi Confirmada',
+          message: `Sua sessão de ${target.date} às ${target.startTime} foi confirmada pelo psicólogo.`,
           read: false,
           createdAt: new Date().toISOString()
         };
-        setNotifications(prev => [notif, ...prev]);
         persistNotification(notif).catch(console.error);
       }
 
       return { success: true };
     } catch (err: any) {
-      console.error('Falha ao atualizar confirmação no Firestore:', err);
+      console.error('Falha ao confirmar agendamento no Firestore:', err);
       return { success: false, error: 'Erro ao confirmar agendamento no Firestore.' };
     }
   };
 
   const rejectAppointment = async (appointmentId: string, reason?: string): Promise<{ success: boolean; error?: string }> => {
     if (!currentUser) return { success: false, error: 'Usuário não autenticado.' };
-
     const target = appointments.find(a => a.id === appointmentId);
     if (!target) return { success: false, error: 'Agendamento não encontrado.' };
 
     if (!isValidAppointmentTransition(target.status, 'rejected')) {
-      return { success: false, error: 'Não é possível recusar este agendamento no estado atual.' };
+      return { success: false, error: 'Transição para status rejeitado inválida para este agendamento.' };
     }
 
     const updated: Appointment = {
       ...target,
       status: 'rejected',
-      cancellationReason: reason || 'Horário indisponível no momento.',
+      cancellationReason: reason,
       updatedAt: new Date().toISOString()
     };
 
@@ -450,37 +472,37 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           recipientUserId: target.patientUserId,
           senderId: currentUser.uid,
           type: 'appointment_rejected',
-          title: 'Solicitação de agendamento não aceita',
-          message: `Infelizmente seu pedido para ${target.date.split('-').reverse().join('/')} às ${target.startTime} não pôde ser aceito. Motivo: ${reason || 'Indisponibilidade de agenda.'}`,
-          link: '/agendar',
+          title: 'Solicitação de Consulta Recusada',
+          message: `A consulta para o dia ${target.date} não pôde ser confirmada.${reason ? ` Motivo: ${reason}` : ''}`,
           read: false,
           createdAt: new Date().toISOString()
         };
-        setNotifications(prev => [notif, ...prev]);
         persistNotification(notif).catch(console.error);
       }
 
       return { success: true };
     } catch (err: any) {
-      console.error('Falha ao rejeitar agendamento no Firestore:', err);
-      return { success: false, error: 'Erro ao registrar recusa de agendamento no Firestore.' };
+      console.error('Falha ao recusar agendamento no Firestore:', err);
+      return { success: false, error: 'Erro ao recusar agendamento no Firestore.' };
     }
   };
 
   const cancelAppointment = async (appointmentId: string, reason?: string): Promise<{ success: boolean; error?: string }> => {
     if (!currentUser) return { success: false, error: 'Usuário não autenticado.' };
-
     const target = appointments.find(a => a.id === appointmentId);
     if (!target) return { success: false, error: 'Agendamento não encontrado.' };
 
-    if (!isValidAppointmentTransition(target.status, 'cancelled')) {
-      return { success: false, error: 'Agendamento não pode ser cancelado no estado atual.' };
+    const callerRole = currentUser.role === 'psychologist' ? 'psychologist' : 'patient';
+    const nextStatus = callerRole === 'patient' && target.status === 'confirmed' ? 'cancellation_requested' : 'cancelled';
+
+    if (!isValidAppointmentTransition(target.status, nextStatus)) {
+      return { success: false, error: 'Transição de cancelamento inválida a partir do estado atual.' };
     }
 
     const updated: Appointment = {
       ...target,
-      status: 'cancelled',
-      cancellationReason: reason || 'Cancelado.',
+      status: nextStatus,
+      cancellationReason: reason || target.cancellationReason,
       updatedAt: new Date().toISOString()
     };
 
@@ -488,36 +510,56 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       await persistAppointment(updated);
       setAppointments(prev => prev.map(a => a.id === appointmentId ? updated : a));
 
-      const recipientId = currentUser.uid === target.psychologistId
-        ? target.patientUserId
-        : target.psychologistId;
-
+      const recipientId = callerRole === 'patient' ? target.psychologistId : target.patientUserId;
       if (recipientId) {
         const notif: AppNotification = {
           id: `notif_${Date.now()}`,
           recipientUserId: recipientId,
           senderId: currentUser.uid,
-          type: 'cancellation_confirmed',
-          title: 'Agendamento Cancelado',
-          message: `O agendamento de ${target.date.split('-').reverse().join('/')} às ${target.startTime} foi cancelado. Motivo: ${reason || 'Cancelado pelo usuário.'}`,
-          link: currentUser.role === 'patient' ? '/meus-agendamentos' : '/agenda',
+          type: nextStatus === 'cancellation_requested' ? 'cancellation_requested' : 'cancellation_confirmed',
+          title: nextStatus === 'cancellation_requested' ? 'Solicitação de Cancelamento' : 'Consulta Cancelada',
+          message: `A consulta do dia ${target.date} às ${target.startTime} foi ${nextStatus === 'cancellation_requested' ? 'solicitada para cancelamento' : 'cancelada'}.`,
           read: false,
           createdAt: new Date().toISOString()
         };
-        setNotifications(prev => [notif, ...prev]);
         persistNotification(notif).catch(console.error);
       }
+
+      // Record audit log
+      const auditLog = sanitizeAuditLog({
+        id: `log_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        userId: currentUser.uid,
+        userEmail: currentUser.email,
+        action: 'cancel_appointment',
+        eventCode: 'APPOINTMENT_CANCELLED',
+        targetCollection: 'appointments',
+        targetId: appointmentId,
+        metadata: {
+          appointmentId,
+          patientId: target.patientId,
+          reasonCode: reason ? reason.slice(0, 30) : 'Sem motivo',
+          previousStatus: target.status,
+          newStatus: nextStatus
+        }
+      });
+      setAuditLogs(prev => [auditLog, ...prev]);
+      persistAuditLog(auditLog).catch(console.error);
 
       return { success: true };
     } catch (err: any) {
       console.error('Falha ao cancelar agendamento no Firestore:', err);
-      return { success: false, error: 'Erro ao registrar cancelamento no Firestore.' };
+      return { success: false, error: 'Erro ao cancelar agendamento no Firestore.' };
     }
   };
 
   const completeAppointment = async (appointmentId: string): Promise<{ success: boolean; error?: string }> => {
     const target = appointments.find(a => a.id === appointmentId);
     if (!target) return { success: false, error: 'Agendamento não encontrado.' };
+
+    if (!isValidAppointmentTransition(target.status, 'completed')) {
+      return { success: false, error: 'Transição para status concluído inválida a partir do estado atual.' };
+    }
 
     const updated: Appointment = {
       ...target,
@@ -530,25 +572,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setAppointments(prev => prev.map(a => a.id === appointmentId ? updated : a));
 
       if (target.paymentStatus === 'pending') {
-        const existingPay = payments.find(p => p.appointmentId === appointmentId);
-        if (!existingPay) {
-          const newPay: PaymentRecord = {
-            id: `pay_${Date.now()}`,
-            psychologistId: target.psychologistId,
-            clinicId: target.clinicId,
-            patientId: target.patientId,
-            patientName: target.patientName,
-            appointmentId: target.id,
-            amount: target.price,
-            method: 'pix',
-            status: 'pending',
-            dueDate: target.date,
-            description: `Sessão de atendimento realizada em ${target.date.split('-').reverse().join('/')}`,
-            createdAt: new Date().toISOString()
-          };
-          await persistPayment(newPay);
-          setPayments(prev => [newPay, ...prev]);
-        }
+        const newPay: PaymentRecord = {
+          id: `pay_${Date.now()}`,
+          psychologistId: target.psychologistId,
+          patientId: target.patientId,
+          patientName: target.patientName,
+          appointmentId: target.id,
+          amount: target.price,
+          method: 'pix',
+          status: 'paid',
+          dueDate: target.date,
+          paidAt: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+          description: `Sessão de Psicoterapia (${target.date})`
+        };
+        await persistPayment(newPay);
+        setPayments(prev => [newPay, ...prev]);
       }
 
       return { success: true };
@@ -616,9 +655,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   // Clinical Records (STRICT ACCESS CONTROL & AUDIT LOGGING)
-  // REQUIREMENT 3: Only the psychologist responsible for care can add records.
+  // Only the treating psychologist responsible for care can add records.
   const addClinicalRecord = async (
-    recordData: Omit<ClinicalRecord, 'id' | 'createdAt' | 'updatedAt' | 'createdBy' | 'isConfidential'>
+    recordData: Omit<ClinicalRecord, 'id' | 'createdAt' | 'updatedAt' | 'createdBy' | 'isConfidential' | 'retifications'>
   ): Promise<{ success: boolean; error?: string; record?: ClinicalRecord }> => {
     if (!currentUser) {
       return { success: false, error: 'Usuário não autenticado.' };
@@ -634,11 +673,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       isConfidential: true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      createdBy: currentUser.displayName
+      createdBy: currentUser.displayName,
+      retifications: []
     };
 
     try {
-      // REQUIREMENT 5: Await Firestore persistence before confirming to UI
       await persistClinicalRecord(newRecord);
       setClinicalRecords(prev => [newRecord, ...prev]);
 
@@ -667,15 +706,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
+  /**
+   * Retifies a clinical record by persisting an audited adendum in the subcollection.
+   * Preserves the original clinical record in strict adherence to CFP 01/2009 Art. 12.
+   */
   const retifyClinicalRecord = async (
     recordId: string,
-    updates: {
-      evolutionNotes?: string;
-      privateNotes?: string;
-      diagnosticHypothesis?: string;
-      conductPlan?: string;
-      retificationNotes: string;
-    }
+    data: { reason: string; content: string } | { retificationNotes: string }
   ): Promise<{ success: boolean; error?: string }> => {
     if (!currentUser || currentUser.role !== 'psychologist') {
       return { success: false, error: 'Apenas o psicólogo titular responsável pode retificar anotações.' };
@@ -686,14 +723,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return { success: false, error: 'Acesso negado: o prontuário pertence a outro profissional.' };
     }
 
-    const updatedRecord: ClinicalRecord = {
-      ...target,
-      ...updates,
-      updatedAt: new Date().toISOString()
-    };
+    const reason = 'reason' in data && data.reason ? data.reason : 'Retificação clínica';
+    const content = 'content' in data && data.content ? data.content : ('retificationNotes' in data ? data.retificationNotes : '');
 
     try {
-      await retifyClinicalRecordInDb(recordId, updates);
+      const newRetif = await addClinicalRecordRectification(recordId, {
+        recordId,
+        psychologistId: currentUser.uid,
+        authorId: currentUser.uid,
+        authorName: currentUser.displayName,
+        timestamp: new Date().toISOString(),
+        reason,
+        content
+      });
+
+      const updatedRecord: ClinicalRecord = {
+        ...target,
+        retificationNotes: content,
+        retifications: [newRetif, ...(target.retifications || [])]
+      };
+
       setClinicalRecords(prev => prev.map(r => r.id === recordId ? updatedRecord : r));
 
       const log: AuditLog = sanitizeAuditLog({
@@ -707,7 +756,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         targetId: recordId,
         metadata: {
           patientId: target.patientId,
-          sessionNumber: target.sessionNumber
+          sessionNumber: target.sessionNumber,
+          reasonCode: reason.slice(0, 30)
         }
       });
       setAuditLogs(prev => [log, ...prev]);
@@ -720,48 +770,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
-  // REQUIREMENT 3: Strictly enforce that only the treating psychologist can read clinical records.
-  // Superadmin, clinic managers, and patients are STRICTLY DENIED access.
+  // Strictly enforce that only the treating psychologist can read clinical records.
   const getPatientClinicalRecords = (patientId: string): ClinicalRecord[] => {
     if (!currentUser || currentUser.role !== 'psychologist') {
       return [];
     }
-
-    const records = clinicalRecords.filter(r => r.patientId === patientId && r.psychologistId === currentUser.uid);
-    if (records.length > 0) {
-      const log: AuditLog = sanitizeAuditLog({
-        id: `log_${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        userId: currentUser.uid,
-        userEmail: currentUser.email,
-        action: 'read_clinical_record',
-        eventCode: 'CLINICAL_RECORD_VIEWED',
-        targetCollection: 'clinical_records',
-        targetId: patientId,
-        metadata: {
-          patientId
-        }
-      });
-      setAuditLogs(prev => [log, ...prev]);
-      persistAuditLog(log).catch(console.error);
-    }
-
-    return records;
+    return clinicalRecords.filter(r => r.patientId === patientId && r.psychologistId === currentUser.uid);
   };
 
   // Finance
   const addPayment = async (paymentData: Omit<PaymentRecord, 'id' | 'createdAt'>): Promise<{ success: boolean; error?: string; payment?: PaymentRecord }> => {
-    const newPay: PaymentRecord = {
+    if (!currentUser) return { success: false, error: 'Não autenticado.' };
+
+    const newPayment: PaymentRecord = {
       ...paymentData,
       id: `pay_${Date.now()}`,
       createdAt: new Date().toISOString()
     };
+
     try {
-      await persistPayment(newPay);
-      setPayments(prev => [newPay, ...prev]);
-      return { success: true, payment: newPay };
+      await persistPayment(newPayment);
+      setPayments(prev => [newPayment, ...prev]);
+      return { success: true, payment: newPayment };
     } catch (err: any) {
-      console.error('Falha ao salvar pagamento no Firestore:', err);
+      console.error('Falha ao gravar pagamento no Firestore:', err);
       return { success: false, error: 'Erro ao registrar pagamento no Firestore.' };
     }
   };
@@ -772,7 +804,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     method?: 'pix' | 'cash' | 'card' | 'transfer'
   ): Promise<{ success: boolean; error?: string }> => {
     const target = payments.find(p => p.id === id);
-    if (!target) return { success: false, error: 'Registro de pagamento não encontrado.' };
+    if (!target) return { success: false, error: 'Registro financeiro não encontrado.' };
 
     const updated: PaymentRecord = {
       ...target,
@@ -792,39 +824,45 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const addExpense = async (expenseData: Omit<ExpenseRecord, 'id'>): Promise<{ success: boolean; error?: string; expense?: ExpenseRecord }> => {
+    if (!currentUser) return { success: false, error: 'Não autenticado.' };
+
     const newExpense: ExpenseRecord = {
       ...expenseData,
       id: `exp_${Date.now()}`
     };
+
     try {
       await persistExpense(newExpense);
       setExpenses(prev => [newExpense, ...prev]);
       return { success: true, expense: newExpense };
     } catch (err: any) {
-      console.error('Falha ao salvar despesa no Firestore:', err);
+      console.error('Falha ao gravar despesa no Firestore:', err);
       return { success: false, error: 'Erro ao registrar despesa no Firestore.' };
     }
   };
 
   // Rooms
   const addRoom = async (roomData: Omit<ClinicRoom, 'id'>): Promise<{ success: boolean; error?: string; room?: ClinicRoom }> => {
+    if (!currentUser) return { success: false, error: 'Não autenticado.' };
+
     const newRoom: ClinicRoom = {
       ...roomData,
       id: `room_${Date.now()}`
     };
+
     try {
       await persistRoom(newRoom);
-      setRooms(prev => [...prev, newRoom]);
+      setRooms(prev => [newRoom, ...prev]);
       return { success: true, room: newRoom };
     } catch (err: any) {
-      console.error('Falha ao registrar sala no Firestore:', err);
-      return { success: false, error: 'Erro ao registrar consultório no Firestore.' };
+      console.error('Falha ao gravar sala no Firestore:', err);
+      return { success: false, error: 'Erro ao cadastrar sala no Firestore.' };
     }
   };
 
   const updateRoom = async (id: string, updates: Partial<ClinicRoom>): Promise<{ success: boolean; error?: string }> => {
     const target = rooms.find(r => r.id === id);
-    if (!target) return { success: false, error: 'Consultório não encontrado.' };
+    if (!target) return { success: false, error: 'Sala não encontrada.' };
 
     const updated: ClinicRoom = { ...target, ...updates };
     try {
@@ -833,7 +871,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return { success: true };
     } catch (err: any) {
       console.error('Falha ao atualizar sala no Firestore:', err);
-      return { success: false, error: 'Erro ao atualizar consultório no Firestore.' };
+      return { success: false, error: 'Erro ao atualizar sala no Firestore.' };
     }
   };
 
@@ -845,8 +883,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         persistenceError,
         currentProfessional,
         currentClinic,
-        allProfessionals: SEED_PROFESSIONALS,
-        clinics: SEED_CLINICS,
+        allProfessionals,
+        clinics,
         rooms,
         patients,
         appointments,
@@ -855,12 +893,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         expenses,
         notifications,
         auditLogs,
-        availability: SEED_AVAILABILITY,
+        availability,
         isAuthenticated: !!currentUser,
         loginUser,
         logout,
         clearPersistenceError,
         refreshAuditLogs,
+        updateAvailability,
         requestAppointment,
         confirmAppointment,
         rejectAppointment,

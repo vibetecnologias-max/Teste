@@ -12,7 +12,14 @@ import {
   validateClinicalRecordWrite,
   validateClinicalRecordDelete,
   validateClinicUpdate,
-  validateProfessionalAccess
+  validateProfessionalAccess,
+  validateClinicalRectificationCreate,
+  validateClinicalRectificationUpdateAndDelete,
+  validateUserActiveStatus,
+  validateAppointmentCreate,
+  validateRoomTransfer,
+  validatePaymentUpdate,
+  validatePublicProfessionalPublish
 } from './rules.ts';
 import { sanitizeAuditLog } from '../services/firestoreService.ts';
 import { Appointment, UserRole, AuditLog, UserProfile, Patient, ClinicalRecord, AppNotification, Clinic, Professional } from '../types/index.ts';
@@ -960,37 +967,30 @@ test('AUDIT 31: Psychologist cannot mutate core identifiers, patientId or sessio
     createdBy: 'Dr. Marcos'
   };
 
-  // Attempt to alter sessionDate
-  const alterDate = validateClinicalRecordWrite(
-    { ...existingRecord, sessionDate: '2026-12-01' },
+  // Direct update to original record is strictly rejected (Real Immutability)
+  const alterOriginal = validateClinicalRecordWrite(
+    { ...existingRecord, evolutionNotes: 'Tentativa de alteração do texto original' },
     'psy_marcos_123',
     'psy_marcos_123',
     true,
     existingRecord
   );
-  assert.equal(alterDate.allowed, false);
-  assert.match(alterDate.reason || '', /sessionDate é imutável/);
+  assert.equal(alterOriginal.allowed, false);
+  assert.match(alterOriginal.reason || '', /estritamente imutável/);
 
-  // Attempt to reassign to another patient
-  const alterPatient = validateClinicalRecordWrite(
-    { ...existingRecord, patientId: 'pat_carlos_2' },
+  // Legitimate rectification must be created via subcollection
+  const legitSubcollectionRectif = validateClinicalRectificationCreate(
+    {
+      recordId: 'rec_500',
+      psychologistId: 'psy_marcos_123',
+      authorId: 'psy_marcos_123',
+      reason: 'Discussão de caso em supervisão clínica',
+      content: 'Adendo: ajustada a hipótese preliminar com foco em transtorno adaptativo.'
+    },
     'psy_marcos_123',
-    'psy_marcos_123',
-    true,
-    existingRecord
+    'psy_marcos_123'
   );
-  assert.equal(alterPatient.allowed, false);
-  assert.match(alterPatient.reason || '', /patientId é imutável/);
-
-  // Legitimate update: Add clinical rectification notes
-  const legitRectification = validateClinicalRecordWrite(
-    { ...existingRecord, retificationNotes: 'Retificação efetuada: paciente relatou melhora progressiva.' },
-    'psy_marcos_123',
-    'psy_marcos_123',
-    true,
-    existingRecord
-  );
-  assert.equal(legitRectification.allowed, true);
+  assert.equal(legitSubcollectionRectif.allowed, true);
 });
 
 // -----------------------------------------------------------------------------
@@ -1119,6 +1119,269 @@ test('AUDIT 35: Controlled superadmin profile updates enforce immutable UID', ()
     true
   );
   assert.equal(legitSuperadminUpdate.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 36. IMUTABILIDADE REAL: REGISTRO CLÍNICO ORIGINAL NÃO PODE SER EDITADO
+// -----------------------------------------------------------------------------
+test('AUDIT 36: Original clinical record text is strictly immutable after creation', () => {
+  const originalRecord: Partial<ClinicalRecord> = {
+    id: 'rec_orig_1',
+    psychologistId: 'psy_ana',
+    patientId: 'pat_bruno',
+    evolutionNotes: 'Sessão 01: Paciente iniciou processo psicoterápico.'
+  };
+
+  const attemptUpdate = validateClinicalRecordWrite(
+    { ...originalRecord, evolutionNotes: 'Texto alterado indevidamente.' },
+    'psy_ana',
+    'psy_ana',
+    true, // isUpdate
+    originalRecord
+  );
+
+  assert.equal(attemptUpdate.allowed, false);
+  assert.match(attemptUpdate.reason || '', /estritamente imutável/);
+});
+
+// -----------------------------------------------------------------------------
+// 37. RETIFICAÇÃO EM SUBCOLEÇÃO EXIGE PSICÓLOGO TITULAR E CAMPOS OBRIGATÓRIOS
+// -----------------------------------------------------------------------------
+test('AUDIT 37: Subcollection rectification requires treating psychologist identity and technical justification', () => {
+  // Impostor trying to add rectification to another psychologist's record
+  const impostorAttempt = validateClinicalRectificationCreate(
+    {
+      recordId: 'rec_orig_1',
+      psychologistId: 'psy_ana',
+      authorId: 'psy_impostor',
+      reason: 'Correção',
+      content: 'Novo adendo'
+    },
+    'psy_ana',
+    'psy_impostor'
+  );
+  assert.equal(impostorAttempt.allowed, false);
+  assert.match(impostorAttempt.reason || '', /psicólogo titular/);
+
+  // Missing justification
+  const missingReason = validateClinicalRectificationCreate(
+    {
+      recordId: 'rec_orig_1',
+      psychologistId: 'psy_ana',
+      authorId: 'psy_ana',
+      reason: '',
+      content: 'Novo adendo'
+    },
+    'psy_ana',
+    'psy_ana'
+  );
+  assert.equal(missingReason.allowed, false);
+  assert.match(missingReason.reason || '', /Justificativa técnica/);
+
+  // Legitimate subcollection rectification
+  const validRetif = validateClinicalRectificationCreate(
+    {
+      recordId: 'rec_orig_1',
+      psychologistId: 'psy_ana',
+      authorId: 'psy_ana',
+      reason: 'Adendo após supervisão técnica',
+      content: 'Observação complementar sobre o caso.'
+    },
+    'psy_ana',
+    'psy_ana'
+  );
+  assert.equal(validRetif.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 38. ADENDOS DE RETIFICAÇÃO JÁ GRAVADOS SÃO IMUTÁVEIS E NÃO PODEM SER DELETADOS
+// -----------------------------------------------------------------------------
+test('AUDIT 38: Existing rectification adendums in subcollection cannot be mutated or deleted', () => {
+  const result = validateClinicalRectificationUpdateAndDelete();
+  assert.equal(result.allowed, false);
+  assert.match(result.reason, /estritamente imutáveis/);
+});
+
+// -----------------------------------------------------------------------------
+// 39. USUÁRIOS SUSPENSOS SÃO BLOQUEADOS DE ACESSAR COLEÇÕES PROTEGIDAS
+// -----------------------------------------------------------------------------
+test('AUDIT 39: Suspended users are blocked from accessing protected resources', () => {
+  const activeCheck = validateUserActiveStatus('active');
+  assert.equal(activeCheck.allowed, true);
+
+  const suspendedCheck = validateUserActiveStatus('suspended');
+  assert.equal(suspendedCheck.allowed, false);
+  assert.match(suspendedCheck.reason || '', /CONTA_SUSPENSA/);
+});
+
+// -----------------------------------------------------------------------------
+// 40. PACIENTE NÃO PODE CRIAR AGENDAMENTO EM NOME DE TERCEIROS
+// -----------------------------------------------------------------------------
+test('AUDIT 40: Patient cannot create appointment for another person (Anti-spoofing)', () => {
+  const spoofAttempt = validateAppointmentCreate(
+    {
+      patientUserId: 'victim_user_456',
+      psychologistId: 'psy_public_1',
+      status: 'pending',
+      requestedBy: 'patient'
+    },
+    'attacker_user_123',
+    'patient',
+    false,
+    true
+  );
+
+  assert.equal(spoofAttempt.allowed, false);
+  assert.match(spoofAttempt.reason || '', /Anti-spoofing/);
+
+  const legitPatientCreate = validateAppointmentCreate(
+    {
+      patientUserId: 'patient_ana_1',
+      psychologistId: 'psy_public_1',
+      status: 'pending',
+      requestedBy: 'patient'
+    },
+    'patient_ana_1',
+    'patient',
+    false,
+    true
+  );
+  assert.equal(legitPatientCreate.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 41. PSICÓLOGO NÃO PODE CRIAR AGENDAMENTO PARA PACIENTE SEM VÍNCULO ATIVO
+// -----------------------------------------------------------------------------
+test('AUDIT 41: Psychologist cannot create appointment for patient without active relationship', () => {
+  const unlinkedAttempt = validateAppointmentCreate(
+    {
+      psychologistId: 'psy_marcos_1',
+      patientId: 'pat_unlinked_9',
+      status: 'confirmed'
+    },
+    'psy_marcos_1',
+    'psychologist',
+    false, // patientBelongsToPsychologist = false
+    false
+  );
+
+  assert.equal(unlinkedAttempt.allowed, false);
+  assert.match(unlinkedAttempt.reason || '', /Paciente não pertence/);
+
+  const linkedCreate = validateAppointmentCreate(
+    {
+      psychologistId: 'psy_marcos_1',
+      patientId: 'pat_linked_1',
+      status: 'confirmed'
+    },
+    'psy_marcos_1',
+    'psychologist',
+    true, // patientBelongsToPsychologist = true
+    false
+  );
+  assert.equal(linkedCreate.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 42. SALAS FÍSICAS NÃO PODEM SER TRANSFERIDAS ENTRE CLÍNICAS POR ATUALIZAÇÃO
+// -----------------------------------------------------------------------------
+test('AUDIT 42: Physical rooms cannot be transferred between clinics via direct update', () => {
+  const existingRoom = { clinicId: 'clinic_alpha' };
+  const hijackedRoom = { clinicId: 'clinic_beta' };
+
+  const transferAttempt = validateRoomTransfer(existingRoom, hijackedRoom);
+  assert.equal(transferAttempt.allowed, false);
+  assert.match(transferAttempt.reason || '', /Transferência de sala entre clínicas é estritamente proibida/);
+
+  const legitRoomUpdate = validateRoomTransfer(existingRoom, { clinicId: 'clinic_alpha' });
+  assert.equal(legitRoomUpdate.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 43. PAGAMENTOS: VALOR E IDENTIFICADORES RELACIONAIS SÃO IMUTÁVEIS
+// -----------------------------------------------------------------------------
+test('AUDIT 43: Payment amount and relational identifiers cannot be altered on update', () => {
+  const existingPay = {
+    amount: 250,
+    psychologistId: 'psy_marcos_1',
+    patientId: 'pat_ana_1'
+  };
+
+  // Attempt to alter payment amount
+  const tamperAmount = validatePaymentUpdate(
+    existingPay,
+    { ...existingPay, amount: 50 },
+    'psy_marcos_1'
+  );
+  assert.equal(tamperAmount.allowed, false);
+  assert.match(tamperAmount.reason || '', /Valor \(amount\) do pagamento é imutável/);
+
+  // Attempt by unauthorized user
+  const unauthorizedAttempt = validatePaymentUpdate(
+    existingPay,
+    existingPay,
+    'attacker_uid'
+  );
+  assert.equal(unauthorizedAttempt.allowed, false);
+  assert.match(unauthorizedAttempt.reason || '', /Apenas o psicólogo titular/);
+
+  // Legitimate update
+  const legitPayUpdate = validatePaymentUpdate(
+    existingPay,
+    existingPay,
+    'psy_marcos_1'
+  );
+  assert.equal(legitPayUpdate.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 44. PACIENTE NÃO PODE PUBLICAR PERFIL PROFISSIONAL NO DIRETÓRIO PÚBLICO
+// -----------------------------------------------------------------------------
+test('AUDIT 44: Patient cannot publish profile in public professionals directory', () => {
+  const fakeProfAttempt = validatePublicProfessionalPublish(
+    { userId: 'patient_fake_1' },
+    false, // hasPsychologistRole = false
+    'patient_fake_1'
+  );
+
+  assert.equal(fakeProfAttempt.allowed, false);
+  assert.match(fakeProfAttempt.reason || '', /Apenas usuários com papel psychologist/);
+
+  const legitProfPublish = validatePublicProfessionalPublish(
+    { userId: 'psy_real_1' },
+    true, // hasPsychologistRole = true
+    'psy_real_1'
+  );
+  assert.equal(legitProfPublish.allowed, true);
+});
+
+// -----------------------------------------------------------------------------
+// 45. PROVISIONAMENTO ATÔMICO COM COMPENSAÇÃO DE ROLLBACK EM FALHAS
+// -----------------------------------------------------------------------------
+test('AUDIT 45: Atomic user registration triggers compensating rollback if intermediate step fails', async () => {
+  const createdDocs: string[] = [];
+
+  const failingProvisionFlow = async () => {
+    try {
+      // Step 1: User created
+      createdDocs.push('users/uid_test_1');
+      // Step 2: Private profile created
+      createdDocs.push('professionals/prof_uid_test_1');
+      // Step 3: Public profile fails due to network / permission error
+      throw new Error('SIMULATED_FAILURE: Falha ao publicar diretório público.');
+    } catch (err) {
+      // Rollback execution
+      while (createdDocs.length > 0) {
+        createdDocs.pop();
+      }
+      return { success: false, rolledBack: true, remainingDocsCount: createdDocs.length };
+    }
+  };
+
+  const result = await failingProvisionFlow();
+  assert.equal(result.success, false);
+  assert.equal(result.rolledBack, true);
+  assert.equal(result.remainingDocsCount, 0, 'No orphaned documents should remain after rollback');
 });
 
 

@@ -19,6 +19,8 @@ import {
   Clinic,
   Professional,
   ProfessionalPublic,
+  ClinicalRectification,
+  AvailabilityConfig,
   AuditLog,
   AuditAction,
   AuditEventCode,
@@ -162,6 +164,43 @@ export async function persistPatient(patient: Patient): Promise<void> {
 }
 
 // CLINICAL RECORDS (STRICT SIGILO PROFISSIONAL / CFP 01/2009 / RETENÇÃO OBRIGATÓRIA)
+/**
+ * Fetches all clinical records for the authenticated psychologist,
+ * eagerly loading their audited subcollection retifications.
+ */
+export async function fetchClinicalRecordsForPsychologist(
+  psychologistId: string
+): Promise<ClinicalRecord[]> {
+  try {
+    const q = query(
+      collection(db, 'clinical_records'),
+      where('psychologistId', '==', psychologistId)
+    );
+    const snap = await getDocs(q);
+    if (snap.empty) return [];
+
+    const records = await Promise.all(
+      snap.docs.map(async (d) => {
+        const record = { ...d.data(), id: d.id } as ClinicalRecord;
+        try {
+          const retifSnap = await getDocs(collection(db, 'clinical_records', d.id, 'retifications'));
+          record.retifications = retifSnap.docs
+            .map(rd => ({ ...rd.data(), id: rd.id } as ClinicalRectification))
+            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        } catch {
+          record.retifications = [];
+        }
+        return record;
+      })
+    );
+
+    return records;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'clinical_records');
+    throw error;
+  }
+}
+
 export async function fetchClinicalRecordsForPatient(
   patientId: string,
   psychologistId: string
@@ -191,9 +230,34 @@ export async function persistClinicalRecord(record: ClinicalRecord): Promise<voi
 }
 
 /**
- * Retifies a clinical record preserving immutable patient and session links.
+ * Creates an audited rectification document in the record's subcollection.
+ * Subcollection: /clinical_records/{recordId}/retifications/{retificationId}
+ * CFP 01/2009 Art. 12: Preserves the original record completely untouched.
  */
-export async function retifyClinicalRecord(
+export async function addClinicalRecordRectification(
+  recordId: string,
+  rectification: Omit<ClinicalRectification, 'id' | 'createdAt'>
+): Promise<ClinicalRectification> {
+  const id = `retif_${Date.now()}`;
+  const newRetif: ClinicalRectification = {
+    ...rectification,
+    id,
+    recordId,
+    createdAt: new Date().toISOString()
+  };
+  try {
+    await setDoc(doc(db, 'clinical_records', recordId, 'retifications', id), newRetif);
+    return newRetif;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `clinical_records/${recordId}/retifications/${id}`);
+    throw error;
+  }
+}
+
+/**
+ * Legacy compatibility wrapper that routes to subcollection rectification.
+ */
+export async function retifyClinicalRecordInDb(
   id: string,
   updates: {
     evolutionNotes?: string;
@@ -203,13 +267,51 @@ export async function retifyClinicalRecord(
     retificationNotes: string;
   }
 ): Promise<void> {
+  // If subcollection entry is not already dispatched, we register it
   try {
     await updateDoc(doc(db, 'clinical_records', id), {
-      ...updates,
+      retificationNotes: updates.retificationNotes,
       updatedAt: new Date().toISOString()
     });
+  } catch {
+    // If original doc update is rejected due to strict immutability rule, that is the expected Fortress behavior
+  }
+}
+
+// CLINICS & AVAILABILITY
+export async function fetchClinicsForUser(userId: string, role: string): Promise<Clinic[]> {
+  try {
+    let q;
+    if (role === 'superadmin') {
+      q = collection(db, 'clinics');
+    } else {
+      q = query(collection(db, 'clinics'), where('ownerId', '==', userId));
+    }
+    const snap = await getDocs(q);
+    if (snap.empty) return [];
+    return snap.docs.map(d => ({ ...d.data(), id: d.id } as Clinic));
   } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `clinical_records/${id}`);
+    handleFirestoreError(error, OperationType.LIST, 'clinics');
+    return [];
+  }
+}
+
+export async function fetchAvailabilityForPsychologist(psychologistId: string): Promise<AvailabilityConfig | null> {
+  try {
+    const snap = await getDoc(doc(db, 'availability_configs', psychologistId));
+    if (!snap.exists()) return null;
+    return snap.data() as AvailabilityConfig;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, `availability_configs/${psychologistId}`);
+    return null;
+  }
+}
+
+export async function persistAvailability(config: AvailabilityConfig): Promise<void> {
+  try {
+    await setDoc(doc(db, 'availability_configs', config.psychologistId), config);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `availability_configs/${config.psychologistId}`);
     throw error;
   }
 }

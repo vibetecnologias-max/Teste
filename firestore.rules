@@ -16,6 +16,13 @@ service cloud.firestore {
       return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
     }
 
+    // Active User Check: Block suspended users from accessing protected collections
+    function isActiveUser() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'active';
+    }
+
     // USERS COLLECTION
     // Anti-privilege-escalation & Controlled Administrative updates
     // Common users cannot change role, uid, clinicId, professionalId, status, permissions.
@@ -29,7 +36,7 @@ service cloud.firestore {
         request.resource.data.role != 'superadmin' &&
         (request.resource.data.role in ['psychologist', 'clinic_manager', 'patient']) &&
         request.resource.data.status == 'active';
-      allow update: if isSignedIn() && (
+      allow update: if isSignedIn() && isActiveUser() && (
         // Regular user self update: strictly limited to non-sensitive profile fields
         (request.auth.uid == userId &&
          request.resource.data.role == resource.data.role &&
@@ -50,10 +57,10 @@ service cloud.firestore {
     // Protected: personal email, personal phone, billing details.
     // Accessible ONLY by the professional themselves or SuperAdmin.
     match /professionals/{profId} {
-      allow get: if isSignedIn() && (resource.data.userId == request.auth.uid || isSuperAdmin());
-      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isSuperAdmin());
-      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid && request.resource.data.id == profId;
-      allow update: if isSignedIn() &&
+      allow get: if isSignedIn() && isActiveUser() && (resource.data.userId == request.auth.uid || isSuperAdmin());
+      allow list: if isSignedIn() && isActiveUser() && (resource.data.userId == request.auth.uid || isSuperAdmin());
+      allow create: if isSignedIn() && isActiveUser() && request.resource.data.userId == request.auth.uid && request.resource.data.id == profId;
+      allow update: if isSignedIn() && isActiveUser() &&
         resource.data.userId == request.auth.uid &&
         request.resource.data.userId == resource.data.userId &&
         request.resource.data.id == resource.data.id;
@@ -62,23 +69,23 @@ service cloud.firestore {
 
     // PROFESSIONALS PUBLIC DIRECTORY (Public Clinical Practice Info)
     // Non-sensitive: name, crp, bio, specialities, duration, price, status.
-    // Available for search and appointment booking by all authenticated users.
+    // Only registered psychologists with valid private profile can publish/update their public profile.
     match /professionals_public/{profId} {
-      allow get, list: if isSignedIn();
-      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid && request.resource.data.id == profId;
-      allow update: if isSignedIn() &&
-        resource.data.userId == request.auth.uid &&
-        request.resource.data.userId == resource.data.userId &&
-        request.resource.data.id == resource.data.id;
+      allow get, list: if isSignedIn() && isActiveUser();
+      allow create, update: if isSignedIn() && isActiveUser() &&
+        request.auth.uid == request.resource.data.userId &&
+        request.resource.data.id == profId &&
+        exists(/databases/$(database)/documents/professionals/$(profId)) &&
+        get(/databases/$(database)/documents/professionals/$(profId)).data.userId == request.auth.uid;
       allow delete: if isSuperAdmin();
     }
 
     // CLINICS (Multi-tenant isolation & Property Protection)
     // Owner cannot transfer ownership, alter CNPJ, status, or plan limits via direct update.
     match /clinics/{clinicId} {
-      allow get, list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isSuperAdmin());
-      allow create: if isSignedIn() && request.resource.data.ownerId == request.auth.uid && request.resource.data.status == 'active';
-      allow update: if isSignedIn() && (
+      allow get, list: if isSignedIn() && isActiveUser() && (resource.data.ownerId == request.auth.uid || isSuperAdmin());
+      allow create: if isSignedIn() && isActiveUser() && request.resource.data.ownerId == request.auth.uid && request.resource.data.status == 'active';
+      allow update: if isSignedIn() && isActiveUser() && (
         isSuperAdmin() ||
         (resource.data.ownerId == request.auth.uid &&
          request.resource.data.ownerId == resource.data.ownerId &&
@@ -93,18 +100,28 @@ service cloud.firestore {
       allow delete: if isSuperAdmin();
     }
 
+    // CLINIC ROOMS
+    // clinicId is immutable, only clinic owner or superadmin can modify
     match /clinic_rooms/{roomId} {
-      allow get, list: if isSignedIn() && (
+      allow get, list: if isSignedIn() && isActiveUser() && (
         isSuperAdmin() ||
         (exists(/databases/$(database)/documents/clinics/$(resource.data.clinicId)) &&
          get(/databases/$(database)/documents/clinics/$(resource.data.clinicId)).data.ownerId == request.auth.uid)
       );
-      allow create: if isSignedIn() && (
+      allow create: if isSignedIn() && isActiveUser() && (
         isSuperAdmin() ||
         (exists(/databases/$(database)/documents/clinics/$(request.resource.data.clinicId)) &&
          get(/databases/$(database)/documents/clinics/$(request.resource.data.clinicId)).data.ownerId == request.auth.uid)
       );
-      allow update, delete: if isSignedIn() && (
+      allow update: if isSignedIn() && isActiveUser() && (
+        isSuperAdmin() ||
+        (exists(/databases/$(database)/documents/clinics/$(resource.data.clinicId)) &&
+         get(/databases/$(database)/documents/clinics/$(resource.data.clinicId)).data.ownerId == request.auth.uid &&
+         request.resource.data.clinicId == resource.data.clinicId &&
+         request.resource.data.id == resource.data.id &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'description', 'color', 'capacity', 'active', 'updatedAt']))
+      );
+      allow delete: if isSignedIn() && isActiveUser() && (
         isSuperAdmin() ||
         (exists(/databases/$(database)/documents/clinics/$(resource.data.clinicId)) &&
          get(/databases/$(database)/documents/clinics/$(resource.data.clinicId)).data.ownerId == request.auth.uid)
@@ -112,50 +129,64 @@ service cloud.firestore {
     }
 
     // PATIENTS (Administrative Data)
-    // Strictly limited to treating psychologist or the patient themselves
+    // Strictly limited to treating psychologist or the patient themselves.
+    // Psychologist can only register patients belonging to their own caseload.
     match /patients/{patientId} {
-      allow get, list: if isSignedIn() && (
+      allow get, list: if isSignedIn() && isActiveUser() && (
         resource.data.psychologistId == request.auth.uid ||
         resource.data.userId == request.auth.uid
       );
-      allow create: if isSignedIn() && (
-        request.resource.data.psychologistId == request.auth.uid ||
-        request.resource.data.userId == request.auth.uid
+      allow create: if isSignedIn() && isActiveUser() && (
+        (request.resource.data.psychologistId == request.auth.uid) ||
+        (request.resource.data.userId == request.auth.uid)
       );
-      allow update: if isSignedIn() && (
+      allow update: if isSignedIn() && isActiveUser() && (
+        // Psychologist update: cannot mutate psychologistId, id, or createdAt
         (resource.data.psychologistId == request.auth.uid &&
          request.resource.data.psychologistId == resource.data.psychologistId &&
-         request.resource.data.id == resource.data.id) ||
+         request.resource.data.id == resource.data.id &&
+         (!('createdAt' in resource.data) || request.resource.data.createdAt == resource.data.createdAt)) ||
+        // Patient update: cannot mutate psychologistId, clinicId, or id
         (resource.data.userId == request.auth.uid &&
          request.resource.data.userId == resource.data.userId &&
          request.resource.data.psychologistId == resource.data.psychologistId &&
-         request.resource.data.id == resource.data.id)
+         request.resource.data.id == resource.data.id &&
+         (!('clinicId' in resource.data) || request.resource.data.clinicId == resource.data.clinicId) &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phone', 'address', 'emergencyContact', 'birthDate', 'updatedAt']))
       );
-      allow delete: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
+      allow delete: if isSignedIn() && isActiveUser() && resource.data.psychologistId == request.auth.uid;
     }
 
-    // APPOINTMENTS (Hardening Consolidado)
+    // APPOINTMENTS
     // - Psychologist and patient only access sessions they participate in.
-    // - Core relational & identification fields are strictly immutable on update:
-    //   psychologistId, patientId, patientUserId, clinicId, roomId, requestedBy, price, patientName, date, times.
+    // - Creation requires legitimate relationship:
+    //   * Psychologist must specify existing patient belonging to their caseload.
+    //   * Patient must specify public psychologist and book as 'pending'.
+    // - Core relational & identification fields are strictly immutable on update.
     // - Status transitions strictly validated per user role.
     match /appointments/{appId} {
-      allow get: if isSignedIn() && (
+      allow get: if isSignedIn() && isActiveUser() && (
         resource.data.psychologistId == request.auth.uid ||
         resource.data.patientUserId == request.auth.uid ||
         resource.data.patientId == request.auth.uid
       );
-      allow list: if isSignedIn() && (
+      allow list: if isSignedIn() && isActiveUser() && (
         resource.data.psychologistId == request.auth.uid ||
         resource.data.patientUserId == request.auth.uid
       );
-      allow create: if isSignedIn() && (
-        (request.resource.data.psychologistId == request.auth.uid) ||
+      allow create: if isSignedIn() && isActiveUser() && (
+        // Psychologist creating session: patient must exist and belong to this psychologist
+        (request.resource.data.psychologistId == request.auth.uid &&
+         exists(/databases/$(database)/documents/patients/$(request.resource.data.patientId)) &&
+         get(/databases/$(database)/documents/patients/$(request.resource.data.patientId)).data.psychologistId == request.auth.uid &&
+         (request.resource.data.status in ['confirmed', 'pending'])) ||
+        // Patient requesting session: must be for themselves, pending status, public psychologist exists
         (request.resource.data.patientUserId == request.auth.uid &&
          request.resource.data.status == 'pending' &&
-         request.resource.data.requestedBy == 'patient')
+         request.resource.data.requestedBy == 'patient' &&
+         exists(/databases/$(database)/documents/professionals_public/$(request.resource.data.psychologistId)))
       );
-      allow update: if isSignedIn() && (
+      allow update: if isSignedIn() && isActiveUser() && (
         // Core relational and financial fields are IMMUTABLE:
         request.resource.data.psychologistId == resource.data.psychologistId &&
         request.resource.data.patientId == resource.data.patientId &&
@@ -185,7 +216,7 @@ service cloud.firestore {
             (resource.data.status == 'confirmed' && request.resource.data.status in ['cancellation_requested', 'cancelled'])))
         )
       );
-      allow delete: if isSignedIn() && (
+      allow delete: if isSignedIn() && isActiveUser() && (
         (resource.data.psychologistId == request.auth.uid && resource.data.status in ['pending', 'cancelled', 'rejected']) ||
         (resource.data.patientUserId == request.auth.uid && resource.data.status == 'pending')
       );
@@ -195,56 +226,60 @@ service cloud.firestore {
     // STRICTEST RULE: Only the treating psychologist who owns the record can access it.
     // SuperAdmin, Clinic Managers, Receptionists and Patients are STRICTLY DENIED read and write.
     // Validates legitimate link: patient must exist and belong to this psychologist.
-    // Core identifiers and session metadata are STRICTLY IMMUTABLE on update.
-    // Deletion is STRICTLY PROHIBITED (CFP 01/2009 Art. 12 mandatory retention).
+    // REAL IMMUTABILITY: original clinical record text is strictly IMMUTABLE once created.
+    // Any rectification is registered as a separate immutable document in the subcollection.
+    // Deletion is STRICTLY PROHIBITED (CFP 01/2009 Art. 12 mandatory 5-year retention).
     match /clinical_records/{recordId} {
-      allow get, list: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
-      allow create: if isSignedIn() &&
+      allow get, list: if isSignedIn() && isActiveUser() && resource.data.psychologistId == request.auth.uid;
+      allow create: if isSignedIn() && isActiveUser() &&
         request.resource.data.psychologistId == request.auth.uid &&
         request.resource.data.patientId is string &&
         request.resource.data.patientId.size() > 0 &&
         exists(/databases/$(database)/documents/patients/$(request.resource.data.patientId)) &&
         get(/databases/$(database)/documents/patients/$(request.resource.data.patientId)).data.psychologistId == request.auth.uid;
-      allow update: if isSignedIn() &&
-        resource.data.psychologistId == request.auth.uid &&
-        request.resource.data.psychologistId == resource.data.psychologistId &&
-        request.resource.data.patientId == resource.data.patientId &&
-        request.resource.data.id == resource.data.id &&
-        (!('appointmentId' in resource.data) || request.resource.data.appointmentId == resource.data.appointmentId) &&
-        request.resource.data.sessionDate == resource.data.sessionDate &&
-        request.resource.data.sessionNumber == resource.data.sessionNumber &&
-        request.resource.data.createdAt == resource.data.createdAt &&
-        request.resource.data.createdBy == resource.data.createdBy &&
-        request.resource.data.isConfidential == true &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['evolutionNotes', 'privateNotes', 'diagnosticHypothesis', 'conductPlan', 'retificationNotes', 'updatedAt']);
-      allow delete: if false; // Retention requirement: clinical records cannot be deleted
+      allow update: if false; // STRICT IMMUTABILITY: original clinical record cannot be edited
+      allow delete: if false; // Retention requirement: clinical records cannot be deleted (CFP 01/2009)
+
+      // SUBCOLLECTION DE RETIFICAÇÕES AUDITADAS
+      // Cada retificação é gravada como adendo separado e imutável pelo psicólogo titular.
+      match /retifications/{retificationId} {
+        allow get, list: if isSignedIn() && isActiveUser() &&
+          get(/databases/$(database)/documents/clinical_records/$(recordId)).data.psychologistId == request.auth.uid;
+        allow create: if isSignedIn() && isActiveUser() &&
+          get(/databases/$(database)/documents/clinical_records/$(recordId)).data.psychologistId == request.auth.uid &&
+          request.resource.data.psychologistId == request.auth.uid &&
+          request.resource.data.recordId == recordId &&
+          request.resource.data.authorId == request.auth.uid;
+        allow update, delete: if false; // Adendos são estritamente imutáveis
+      }
     }
 
     // FINANCIAL: PAYMENTS & EXPENSES
     match /payments/{paymentId} {
-      allow get, list: if isSignedIn() && (
+      allow get, list: if isSignedIn() && isActiveUser() && (
         resource.data.psychologistId == request.auth.uid ||
         resource.data.patientUserId == request.auth.uid
       );
-      allow create: if isSignedIn() && request.resource.data.psychologistId == request.auth.uid;
-      allow update: if isSignedIn() && resource.data.psychologistId == request.auth.uid &&
+      allow create: if isSignedIn() && isActiveUser() && request.resource.data.psychologistId == request.auth.uid;
+      allow update: if isSignedIn() && isActiveUser() && resource.data.psychologistId == request.auth.uid &&
         request.resource.data.psychologistId == resource.data.psychologistId &&
         request.resource.data.id == resource.data.id &&
+        request.resource.data.amount == resource.data.amount &&
+        request.resource.data.patientId == resource.data.patientId &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'paidAt', 'method', 'updatedAt']);
       allow delete: if isSuperAdmin();
     }
 
     match /expenses/{expenseId} {
-      allow get, list: if isSignedIn() && resource.data.psychologistId == request.auth.uid;
-      allow create: if isSignedIn() && request.resource.data.psychologistId == request.auth.uid;
-      allow update, delete: if isSignedIn() && resource.data.psychologistId == request.auth.uid &&
+      allow get, list: if isSignedIn() && isActiveUser() && resource.data.psychologistId == request.auth.uid;
+      allow create: if isSignedIn() && isActiveUser() && request.resource.data.psychologistId == request.auth.uid;
+      allow update, delete: if isSignedIn() && isActiveUser() && resource.data.psychologistId == request.auth.uid &&
         request.resource.data.psychologistId == resource.data.psychologistId;
     }
 
     // SUBSCRIPTIONS & PLANS (Multi-tenant SaaS isolation)
-    // Strict isolation to tenant owner (user or clinic owner) or superadmin.
     match /subscriptions/{subId} {
-      allow get, list: if isSignedIn() && (
+      allow get, list: if isSignedIn() && isActiveUser() && (
         resource.data.targetId == request.auth.uid ||
         resource.data.userId == request.auth.uid ||
         (('clinicId' in resource.data) && exists(/databases/$(database)/documents/clinics/$(resource.data.clinicId)) && get(/databases/$(database)/documents/clinics/$(resource.data.clinicId)).data.ownerId == request.auth.uid) ||
@@ -253,33 +288,30 @@ service cloud.firestore {
       allow create, update, delete: if isSuperAdmin();
     }
 
-    // NOTIFICATIONS (Hardening Consolidado)
-    // - Recipient validated: recipientUserId == request.auth.uid for read/update/delete.
-    // - Mandatory senderId: must be non-empty string and match authenticated UID.
-    // - recipientUserId is STRICTLY IMMUTABLE.
-    // - Updates restricted to read status and updatedAt.
+    // NOTIFICATIONS
     match /notifications/{notifId} {
-      allow get, list: if isSignedIn() && resource.data.recipientUserId == request.auth.uid;
-      allow create: if isSignedIn() &&
+      allow get, list: if isSignedIn() && isActiveUser() && resource.data.recipientUserId == request.auth.uid;
+      allow create: if isSignedIn() && isActiveUser() &&
         request.resource.data.recipientUserId is string &&
         request.resource.data.recipientUserId.size() > 0 &&
         request.resource.data.senderId is string &&
         request.resource.data.senderId.size() > 0 &&
         request.resource.data.senderId == request.auth.uid;
-      allow update: if isSignedIn() &&
+      allow update: if isSignedIn() && isActiveUser() &&
         resource.data.recipientUserId == request.auth.uid &&
         request.resource.data.recipientUserId == resource.data.recipientUserId &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'updatedAt']);
-      allow delete: if isSignedIn() && resource.data.recipientUserId == request.auth.uid;
+      allow delete: if isSignedIn() && isActiveUser() && resource.data.recipientUserId == request.auth.uid;
     }
 
-    // AUDIT LOGS (Immutable security audit trail)
+    // AUDIT LOGS
     // Append-only for users with structured format, read-only for superadministrators, never updatable or deletable
     match /audit_logs/{logId} {
       allow get, list: if isSuperAdmin();
-      allow create: if isSignedIn() &&
+      allow create: if isSignedIn() && isActiveUser() &&
         request.resource.data.userId == request.auth.uid &&
         request.resource.data.action in ['read_clinical_record', 'create_clinical_record', 'update_clinical_record', 'cancel_appointment', 'role_change'] &&
+        request.resource.data.eventCode in ['CLINICAL_RECORD_VIEWED', 'CLINICAL_RECORD_CREATED', 'CLINICAL_RECORD_RECTIFIED', 'APPOINTMENT_CANCELLED', 'USER_ROLE_CHANGED'] &&
         request.resource.data.targetCollection in ['clinical_records', 'appointments', 'users', 'patients'] &&
         request.resource.data.targetId is string && request.resource.data.targetId.size() <= 128 &&
         request.resource.data.details is string && request.resource.data.details.size() <= 300;

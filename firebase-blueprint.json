@@ -111,6 +111,23 @@
       },
       "required": ["id", "psychologistId", "patientId", "sessionDate", "evolutionNotes"]
     },
+    "ClinicalRectification": {
+      "title": "ClinicalRectification",
+      "description": "Chronological audited rectification adendum for a clinical record stored in subcollection, immutable once created.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "recordId": { "type": "string", "maxLength": 128 },
+        "psychologistId": { "type": "string", "maxLength": 128 },
+        "authorId": { "type": "string", "maxLength": 128 },
+        "authorName": { "type": "string", "maxLength": 120 },
+        "timestamp": { "type": "string" },
+        "reason": { "type": "string", "maxLength": 500 },
+        "content": { "type": "string", "maxLength": 5000 },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "recordId", "psychologistId", "authorId", "reason", "content", "createdAt"]
+    },
     "Payment": {
       "title": "Payment",
       "description": "Financial ledger for sessions.",
@@ -252,6 +269,10 @@
     "/clinical_records/{recordId}": {
       "schema": "ClinicalRecord",
       "description": "Confidential patient session evolutions accessible only by the treating psychologist."
+    },
+    "/clinical_records/{recordId}/retifications/{retificationId}": {
+      "schema": "ClinicalRectification",
+      "description": "Chronological audited rectification adendums for psychotherapy records (CFP 01/2009 Art. 12)."
     },
     "/payments/{paymentId}": {
       "schema": "Payment",

@@ -1,23 +1,47 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   Clock,
   Calendar,
   Save,
   CheckCircle2,
-  Plus,
-  Trash2,
   AlertCircle
 } from 'lucide-react';
-import { WeeklyScheduleDay } from '../../types';
+import { WeeklyScheduleDay, AvailabilityConfig } from '../../types';
+
+const DEFAULT_SCHEDULE: WeeklyScheduleDay[] = [
+  { dayOfWeek: 0, isWorking: false, intervals: [] },
+  { dayOfWeek: 1, isWorking: true, intervals: [{ start: '08:00', end: '12:00' }, { start: '13:00', end: '18:00' }] },
+  { dayOfWeek: 2, isWorking: true, intervals: [{ start: '08:00', end: '12:00' }, { start: '13:00', end: '18:00' }] },
+  { dayOfWeek: 3, isWorking: true, intervals: [{ start: '08:00', end: '12:00' }, { start: '13:00', end: '18:00' }] },
+  { dayOfWeek: 4, isWorking: true, intervals: [{ start: '08:00', end: '12:00' }, { start: '13:00', end: '18:00' }] },
+  { dayOfWeek: 5, isWorking: true, intervals: [{ start: '08:00', end: '12:00' }, { start: '13:00', end: '18:00' }] },
+  { dayOfWeek: 6, isWorking: false, intervals: [] }
+];
 
 export const AvailabilitySettings: React.FC = () => {
-  const { availability, currentUser } = useApp();
+  const { availability, currentUser, updateAvailability } = useApp();
 
-  const [schedule, setSchedule] = useState<WeeklyScheduleDay[]>(availability.weeklySchedule);
-  const [slotDuration, setSlotDuration] = useState(availability.slotDurationMinutes);
-  const [buffer, setBuffer] = useState(availability.bufferMinutes);
+  const [schedule, setSchedule] = useState<WeeklyScheduleDay[]>(
+    availability?.weeklySchedule ?? DEFAULT_SCHEDULE
+  );
+  const [slotDuration, setSlotDuration] = useState<number>(
+    availability?.slotDurationMinutes ?? 50
+  );
+  const [buffer, setBuffer] = useState<number>(
+    availability?.bufferMinutes ?? 10
+  );
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (availability) {
+      setSchedule(availability.weeklySchedule);
+      setSlotDuration(availability.slotDurationMinutes);
+      setBuffer(availability.bufferMinutes);
+    }
+  }, [availability]);
 
   const daysOfWeek = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
 
@@ -48,10 +72,33 @@ export const AvailabilitySettings: React.FC = () => {
     }));
   };
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSavedSuccess(true);
-    setTimeout(() => setSavedSuccess(false), 2500);
+    if (!currentUser?.uid) return;
+    setSaving(true);
+    setSaveError(null);
+
+    const config: AvailabilityConfig = {
+      psychologistId: currentUser.professionalId || currentUser.uid,
+      weeklySchedule: schedule,
+      slotDurationMinutes: slotDuration,
+      bufferMinutes: buffer,
+      blockedDates: availability?.blockedDates || []
+    };
+
+    try {
+      const res = await updateAvailability(config);
+      if (res.success) {
+        setSavedSuccess(true);
+        setTimeout(() => setSavedSuccess(false), 3000);
+      } else {
+        setSaveError(res.error || 'Falha ao salvar configurações.');
+      }
+    } catch (err: any) {
+      setSaveError(err.message || 'Erro inesperado.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -67,17 +114,25 @@ export const AvailabilitySettings: React.FC = () => {
 
         <button
           onClick={handleSave}
-          className="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold flex items-center gap-1.5 shadow-2xs transition-colors self-start sm:self-auto"
+          disabled={saving}
+          className="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 shadow-2xs transition-colors self-start sm:self-auto cursor-pointer"
         >
           <Save className="w-4 h-4" />
-          <span>Salvar Configurações</span>
+          <span>{saving ? 'Salvando...' : 'Salvar Configurações'}</span>
         </button>
       </div>
 
       {savedSuccess && (
         <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-2">
           <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-          <span>Horários de disponibilidade atualizados com sucesso! O Portal do Paciente já reflete suas novas janelas de consulta.</span>
+          <span>Horários de disponibilidade atualizados com sucesso no Firestore! O Portal do Paciente já reflete suas novas janelas de consulta.</span>
+        </div>
+      )}
+
+      {saveError && (
+        <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
+          <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
+          <span>{saveError}</span>
         </div>
       )}
 

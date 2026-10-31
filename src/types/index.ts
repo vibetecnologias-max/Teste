@@ -141,10 +141,23 @@ export interface ClinicalRecord {
   diagnosticHypothesis?: string;
   conductPlan?: string;
   retificationNotes?: string;
+  retifications?: ClinicalRectification[];
   isConfidential: true;
   createdAt: string;
   updatedAt: string;
   createdBy: string;
+}
+
+export interface ClinicalRectification {
+  id: string;
+  recordId: string;
+  psychologistId: string;
+  authorId: string;
+  authorName: string;
+  timestamp: string;
+  reason: string;
+  content: string;
+  createdAt: string;
 }
 
 export interface PaymentRecord {

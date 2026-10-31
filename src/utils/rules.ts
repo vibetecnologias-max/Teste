@@ -457,43 +457,49 @@ export function validateClinicalRecordWrite(
     return { allowed: false, reason: 'Vínculo inválido: o paciente não pertence a este psicólogo.' };
   }
 
-  if (isUpdate && existingRecord) {
-    if (record.psychologistId !== existingRecord.psychologistId) {
-      return { allowed: false, reason: 'psychologistId é imutável em prontuários clínicos.' };
-    }
-    if (record.patientId !== existingRecord.patientId) {
-      return { allowed: false, reason: 'patientId é imutável em prontuários clínicos.' };
-    }
-    if (record.id !== existingRecord.id) {
-      return { allowed: false, reason: 'id é imutável em prontuários clínicos.' };
-    }
-    if (existingRecord.sessionDate && record.sessionDate !== existingRecord.sessionDate) {
-      return { allowed: false, reason: 'sessionDate é imutável após registro.' };
-    }
-    if (existingRecord.sessionNumber && record.sessionNumber !== existingRecord.sessionNumber) {
-      return { allowed: false, reason: 'sessionNumber é imutável após registro.' };
-    }
-    if (existingRecord.createdAt && record.createdAt !== existingRecord.createdAt) {
-      return { allowed: false, reason: 'createdAt é imutável.' };
-    }
-
-    const allowedUpdateKeys = new Set([
-      'evolutionNotes',
-      'privateNotes',
-      'diagnosticHypothesis',
-      'conductPlan',
-      'retificationNotes',
-      'updatedAt'
-    ]);
-
-    for (const key of Object.keys(record)) {
-      if ((existingRecord as any)[key] !== (record as any)[key] && !allowedUpdateKeys.has(key)) {
-        return { allowed: false, reason: `Campo ${key} não pode ser alterado em prontuários.` };
-      }
-    }
+  if (isUpdate) {
+    return {
+      allowed: false,
+      reason: 'O registro clínico original é estritamente imutável após a criação (CFP 01/2009). Retificações devem ser registradas na subcoleção /retifications.'
+    };
   }
 
   return { allowed: true };
+}
+
+/**
+ * Validates clinical record subcollection rectification creation.
+ * Subcollection: /clinical_records/{recordId}/retifications/{retificationId}
+ */
+export function validateClinicalRectificationCreate(
+  rectification: { recordId: string; psychologistId: string; authorId: string; reason: string; content: string },
+  parentRecordPsychologistId: string,
+  callerUid: string
+): { allowed: boolean; reason?: string } {
+  if (!callerUid) return { allowed: false, reason: 'Não autenticado.' };
+  if (callerUid !== parentRecordPsychologistId) {
+    return { allowed: false, reason: 'Apenas o psicólogo titular do prontuário pode adicionar retificações.' };
+  }
+  if (rectification.psychologistId !== callerUid || rectification.authorId !== callerUid) {
+    return { allowed: false, reason: 'Anti-spoofing: authorId e psychologistId devem coincidir com o usuário autenticado.' };
+  }
+  if (!rectification.reason || rectification.reason.trim().length === 0) {
+    return { allowed: false, reason: 'Justificativa técnica da retificação é obrigatória.' };
+  }
+  if (!rectification.content || rectification.content.trim().length === 0) {
+    return { allowed: false, reason: 'Conteúdo do adendo de retificação é obrigatório.' };
+  }
+  return { allowed: true };
+}
+
+/**
+ * Validates that rectification adendums are strictly immutable and cannot be updated or deleted.
+ */
+export function validateClinicalRectificationUpdateAndDelete(): { allowed: boolean; reason: string } {
+  return {
+    allowed: false,
+    reason: 'Adendos de retificação são estritamente imutáveis e protegidos contra alteração ou exclusão.'
+  };
 }
 
 /**
@@ -577,4 +583,109 @@ export function validateProfessionalAccess(
   }
   // Private record is accessible only by the professional themselves or superadmin
   return prof.userId === callerUid || isSuperAdmin;
+}
+
+/**
+ * Validates active status: suspended users are blocked from protected operations.
+ */
+export function validateUserActiveStatus(status: string): { allowed: boolean; reason?: string } {
+  if (status === 'suspended') {
+    return { allowed: false, reason: 'CONTA_SUSPENSA: Usuários suspensos estão bloqueados de acessar coleções protegidas.' };
+  }
+  return { allowed: true };
+}
+
+/**
+ * Validates appointment creation relationship gates.
+ */
+export function validateAppointmentCreate(
+  appointment: Partial<Appointment>,
+  callerUid: string,
+  role: 'psychologist' | 'patient',
+  patientBelongsToPsychologist: boolean,
+  publicProfessionalExists: boolean
+): { allowed: boolean; reason?: string } {
+  if (!callerUid) return { allowed: false, reason: 'Não autenticado.' };
+
+  if (role === 'psychologist') {
+    if (appointment.psychologistId !== callerUid) {
+      return { allowed: false, reason: 'Psicólogo só pode criar agendamentos em sua própria agenda.' };
+    }
+    if (!patientBelongsToPsychologist) {
+      return { allowed: false, reason: 'Paciente não pertence ao vínculo ativo deste psicólogo.' };
+    }
+    if (!['confirmed', 'pending'].includes(appointment.status || '')) {
+      return { allowed: false, reason: 'Status inicial inválido para agendamento profissional.' };
+    }
+    return { allowed: true };
+  }
+
+  if (role === 'patient') {
+    if (appointment.patientUserId !== callerUid) {
+      return { allowed: false, reason: 'Anti-spoofing: paciente não pode criar agendamentos em nome de terceiros.' };
+    }
+    if (appointment.status !== 'pending') {
+      return { allowed: false, reason: 'Paciente só pode solicitar agendamento no estado inicial pendente.' };
+    }
+    if (appointment.requestedBy !== 'patient') {
+      return { allowed: false, reason: 'requestedBy deve ser patient.' };
+    }
+    if (!publicProfessionalExists) {
+      return { allowed: false, reason: 'Profissional não encontrado no diretório público de psicólogos.' };
+    }
+    return { allowed: true };
+  }
+
+  return { allowed: false, reason: 'Papel de usuário não autorizado para criação de agendamentos.' };
+}
+
+/**
+ * Validates that physical rooms cannot be transferred between clinics.
+ */
+export function validateRoomTransfer(
+  existingRoom: { clinicId: string },
+  incomingRoom: { clinicId: string }
+): { allowed: boolean; reason?: string } {
+  if (incomingRoom.clinicId !== existingRoom.clinicId) {
+    return { allowed: false, reason: 'Transferência de sala entre clínicas é estritamente proibida por atualização direta.' };
+  }
+  return { allowed: true };
+}
+
+/**
+ * Validates that financial payments protect immutable amount and relational keys.
+ */
+export function validatePaymentUpdate(
+  existing: { amount: number; psychologistId: string; patientId: string },
+  incoming: { amount: number; psychologistId: string; patientId: string },
+  callerUid: string
+): { allowed: boolean; reason?: string } {
+  if (callerUid !== existing.psychologistId) {
+    return { allowed: false, reason: 'Apenas o psicólogo titular pode gerenciar o registro financeiro.' };
+  }
+  if (incoming.amount !== existing.amount) {
+    return { allowed: false, reason: 'Valor (amount) do pagamento é imutável após registro.' };
+  }
+  if (incoming.psychologistId !== existing.psychologistId || incoming.patientId !== existing.patientId) {
+    return { allowed: false, reason: 'Identificadores relacionais do pagamento são imutáveis.' };
+  }
+  return { allowed: true };
+}
+
+/**
+ * Validates that only registered psychologists can publish their public profile.
+ */
+export function validatePublicProfessionalPublish(
+  prof: { userId: string },
+  hasPsychologistRole: boolean,
+  callerUid: string
+): { allowed: boolean; reason?: string } {
+  if (!callerUid) return { allowed: false, reason: 'Não autenticado.' };
+  if (callerUid !== prof.userId) {
+    return { allowed: false, reason: 'Apenas o titular pode publicar seu perfil profissional.' };
+  }
+  if (!hasPsychologistRole) {
+    return { allowed: false, reason: 'Apenas usuários com papel psychologist podem criar perfil público profissional.' };
+  }
+  return { allowed: true };
 }

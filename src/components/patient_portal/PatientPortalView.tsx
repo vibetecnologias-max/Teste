@@ -80,6 +80,11 @@ export const PatientPortalView: React.FC<PatientPortalViewProps> = ({ initialTab
     e.preventDefault();
     setBookingError(null);
 
+    if (!selectedProfessional) {
+      setBookingError('Nenhum profissional disponível para agendamento no momento.');
+      return;
+    }
+
     if (!selectedSlot) {
       setBookingError('Por favor, selecione um dos horários disponíveis.');
       return;

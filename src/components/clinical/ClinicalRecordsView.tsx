@@ -130,16 +130,11 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
     setIsRetifying(true);
     setRetificationError(null);
 
-    const timestamp = new Date().toLocaleString('pt-BR');
-    const newEntry = `[RETIFICAÇÃO em ${timestamp} por ${currentUser.displayName} • Motivo: ${retificationReason.trim()}]\n${retificationText.trim()}`;
-    const consolidatedNotes = retifyingRecord.retificationNotes
-      ? `${newEntry}\n\n---\n${retifyingRecord.retificationNotes}`
-      : newEntry;
-
     const res = await retifyClinicalRecord(
       retifyingRecord.id,
       {
-        retificationNotes: consolidatedNotes
+        reason: retificationReason.trim(),
+        content: retificationText.trim()
       }
     );
 
@@ -323,8 +318,38 @@ export const ClinicalRecordsView: React.FC<ClinicalRecordsViewProps> = ({ initia
                 </div>
               )}
 
-              {/* Rectification Notes (CFP 01/2009 Art. 12: strictly preserves original record) */}
-              {rec.retificationNotes && (
+              {/* Audited Subcollection Rectifications (CFP 01/2009 Art. 12: Preserves original record) */}
+              {rec.retifications && rec.retifications.length > 0 && (
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-900">
+                    <History className="w-3.5 h-3.5 text-indigo-700" />
+                    <span>Adendos de Retificação Auditados ({rec.retifications.length}):</span>
+                  </div>
+                  {rec.retifications.map((retif) => (
+                    <div
+                      key={retif.id}
+                      className="p-3 rounded-lg bg-indigo-50/70 border border-indigo-200 text-xs space-y-1.5"
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between text-[11px] text-indigo-950 font-semibold gap-1 pb-1 border-b border-indigo-100">
+                        <span>Retificado por: {retif.authorName}</span>
+                        <span className="text-slate-500 font-mono text-[10px]">
+                          {new Date(retif.createdAt).toLocaleDateString('pt-BR')} às {new Date(retif.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-indigo-800">
+                        <span className="font-bold">Justificativa: </span>
+                        <span>{retif.reason}</span>
+                      </div>
+                      <p className="text-slate-800 whitespace-pre-line leading-relaxed bg-white p-2.5 rounded border border-indigo-100 font-sans text-xs">
+                        {retif.content}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Legacy retification display fallback */}
+              {(!rec.retifications || rec.retifications.length === 0) && rec.retificationNotes && (
                 <div className="p-3 rounded-lg bg-indigo-50/70 border border-indigo-200 text-xs">
                   <div className="flex items-center gap-1.5 font-bold text-indigo-900 mb-1">
                     <History className="w-3.5 h-3.5 text-indigo-700" />
